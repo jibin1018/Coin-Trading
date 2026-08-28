@@ -36,7 +36,11 @@ PERP_FEE_PCT = 0.05
 # 전액을 실제로 매수하므로 레버리지의 영향을 받지 않고, 이 배수는 오직 선물 숏의 증거금 요구량만
 # 줄인다 -- 델타중립 자체(스팟 롱 수량 == 선물 숏 수량)는 그대로 유지되므로 헤지가 깨지지 않는다.
 LEVERAGE = int(os.environ.get("FUNDING_ARB_LEVERAGE", "3"))
-MIN_ANNUALIZED_FUNDING_PCT_TO_ENTER = 5.0
+MIN_ANNUALIZED_FUNDING_PCT_TO_ENTER = float(os.environ.get("FUNDING_ARB_MIN_ANNUALIZED_ENTRY_PCT", "5.0"))
+# 신규진입 중단 스위치 — 켜두면 보유중인 포지션은 기존 로직(EXIT_IF_ANNUALIZED_FUNDING_PCT_BELOW)
+# 그대로 자동 청산되지만, 청산된 자리에 새로 진입하지는 않는다. 다른 전략(TRX 스윙 등)으로
+# 자금을 옮기는 동안, 판 돈이 제자리로 다시 들어가지 않게 막는 용도.
+HALT_NEW_ENTRIES = os.environ.get("FUNDING_ARB_HALT_NEW_ENTRIES", "false").lower() == "true"
 EXIT_IF_ANNUALIZED_FUNDING_PCT_BELOW = 0.0
 FUNDING_SETTLEMENTS_PER_YEAR = 3 * 365  # 8시간마다 정산
 # 델타중립(현물 롱 + 선물 숏) 전략이라 정상적인 변동성은 매우 낮아야 한다 — 두 자릿수대 손실은
@@ -89,6 +93,10 @@ def run_cycle() -> None:
     if state.get("trading_halted"):
         return
 
+    if HALT_NEW_ENTRIES and not state.get("halt_new_entries_logged"):
+        log_event(state, "⚠ 신규진입 중단 모드 — 보유중인 포지션은 기존 청산조건대로 자동 매도되지만, 이후 재진입은 하지 않습니다(자금 이관 진행중).")
+        state["halt_new_entries_logged"] = True
+
     spot = spot_client()
     fut = futures_client()
 
@@ -125,6 +133,8 @@ def run_cycle() -> None:
         annualized = _annualized_funding_pct(rate)
 
         if position is None:
+            if HALT_NEW_ENTRIES:
+                continue
             if notional_per_symbol_usdt <= 0:
                 continue
             if annualized >= MIN_ANNUALIZED_FUNDING_PCT_TO_ENTER:

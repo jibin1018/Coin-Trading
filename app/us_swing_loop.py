@@ -40,6 +40,7 @@ def main() -> None:
             is_weekday = now.weekday() < 5
 
             if is_weekday and MARKET_OPEN <= now.time() <= MARKET_CLOSE_FOR_RISK:
+                state = load_state()
                 run_intraday_risk(token, state)
             elif is_weekday and now.time() >= SCAN_AFTER:
                 run_daily_scan(token)

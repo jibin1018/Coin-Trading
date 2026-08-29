@@ -15,9 +15,7 @@ from __future__ import annotations
 
 import json
 
-import requests
-
-from app.kis_auth import VTS_BASE_URL, app_credentials
+from app.kis_auth import VTS_BASE_URL, app_credentials, throttled_request
 
 BUY_TR_ID = "VTTT1002U"
 SELL_TR_ID = "VTTT1001U"
@@ -41,11 +39,11 @@ def _headers(token: str, tr_id: str) -> dict:
 
 
 def inquire_price(token: str, symbol: str, excd: str) -> float:
-    resp = requests.get(
+    resp = throttled_request(
+        "GET",
         f"{VTS_BASE_URL}/uapi/overseas-price/v1/quotations/price",
         headers=_headers(token, PRICE_TR_ID),
         params={"AUTH": "", "EXCD": excd, "SYMB": symbol},
-        timeout=15,
     )
     body = resp.json()
     if body.get("rt_cd") != "0" or not body.get("output", {}).get("last"):
@@ -72,11 +70,11 @@ def place_order(token: str, cano: str, acnt_prdt_cd: str, symbol: str, excd: str
         "ORD_SVR_DVSN_CD": "0",
         "ORD_DVSN": "00",
     }
-    resp = requests.post(
+    resp = throttled_request(
+        "POST",
         f"{VTS_BASE_URL}/uapi/overseas-stock/v1/trading/order",
         headers=_headers(token, tr_id),
         data=json.dumps(body),
-        timeout=15,
     )
     return resp.json()
 
@@ -91,10 +89,10 @@ def inquire_balance(token: str, cano: str, acnt_prdt_cd: str, excd: str) -> dict
         "CTX_AREA_FK200": "",
         "CTX_AREA_NK200": "",
     }
-    resp = requests.get(
+    resp = throttled_request(
+        "GET",
         f"{VTS_BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance",
         headers=headers,
         params=params,
-        timeout=15,
     )
     return resp.json()

@@ -8,9 +8,8 @@ from __future__ import annotations
 import time
 
 import pandas as pd
-import requests
 
-from app.kis_auth import VTS_BASE_URL, app_credentials
+from app.kis_auth import VTS_BASE_URL, app_credentials, throttled_request
 
 DEFAULT_MAX_RETRIES = 4
 DEFAULT_TIMEOUT_SECONDS = 15
@@ -36,9 +35,11 @@ def fetch_page_with_retry(
     }
     for attempt in range(max_retries):
         try:
-            resp = requests.get(f"{VTS_BASE_URL}{url_path}", headers=headers, params=params, timeout=DEFAULT_TIMEOUT_SECONDS)
+            resp = throttled_request(
+                "GET", f"{VTS_BASE_URL}{url_path}", headers=headers, params=params, timeout=DEFAULT_TIMEOUT_SECONDS
+            )
             body = resp.json()
-        except requests.exceptions.RequestException as exc:
+        except Exception as exc:  # noqa: BLE001 — throttled_request 내부의 requests 예외를 그대로 흡수
             if attempt < max_retries - 1:
                 time.sleep(2 * (attempt + 1))
                 continue

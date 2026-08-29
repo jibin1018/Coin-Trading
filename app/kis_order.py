@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import json
 
-import requests
-
-from app.kis_auth import VTS_BASE_URL, app_credentials
+from app.kis_auth import VTS_BASE_URL, app_credentials, throttled_request
 
 BUY_TR_ID = "VTTC0012U"
 SELL_TR_ID = "VTTC0011U"
@@ -45,11 +43,11 @@ def place_order(token: str, cano: str, acnt_prdt_cd: str, symbol: str, side: str
         "ORD_UNPR": str(price) if price else "0",
         "EXCG_ID_DVSN_CD": "KRX",
     }
-    resp = requests.post(
+    resp = throttled_request(
+        "POST",
         f"{VTS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
         headers=_headers(token, tr_id),
         data=json.dumps(body),
-        timeout=15,
     )
     return resp.json()
 
@@ -70,22 +68,22 @@ def inquire_balance(token: str, cano: str, acnt_prdt_cd: str) -> dict:
         "CTX_AREA_FK100": "",
         "CTX_AREA_NK100": "",
     }
-    resp = requests.get(
+    resp = throttled_request(
+        "GET",
         f"{VTS_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
         headers=headers,
         params=params,
-        timeout=15,
     )
     return resp.json()
 
 
 def inquire_price(token: str, symbol: str) -> float:
     """현재가(종가/실시간가) 반환. 실패 시 예외."""
-    resp = requests.get(
+    resp = throttled_request(
+        "GET",
         f"{VTS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
         headers=_headers(token, PRICE_TR_ID),
         params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": symbol},
-        timeout=15,
     )
     body = resp.json()
     if body.get("rt_cd") != "0":

@@ -16,6 +16,8 @@ _DEFAULT_STATE = {
     "pending_exits": [],
     "last_scan_date": None,  # 미국 동부시간(America/New_York) 기준 "YYYY-MM-DD"
     "trade_log": [],
+    "equity_history": [],    # [{ts, total_pnl_usd}] — 대시보드 기간별(일/주/월/전체) 손익 차트용
+    "position_history": {},  # {symbol: [{ts, price, unrealized_pnl_usd}]} — 종목별 차트용
 }
 
 

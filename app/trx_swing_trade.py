@@ -148,10 +148,17 @@ def run_cycle() -> None:
             log_event(state, "관망 — 골든크로스 대기중")
 
     total_pnl = state.get("cumulative_realized_pnl_usdt", 0.0)
+    unrealized_now = 0.0
     if state.get("position"):
-        total_pnl += (current_price - state["position"]["entry_price"]) * state["position"]["qty"]
+        unrealized_now = (current_price - state["position"]["entry_price"]) * state["position"]["qty"]
+        total_pnl += unrealized_now
     state["equity_history"] = (state.get("equity_history", []) + [
         {"ts": now_iso(), "total_pnl_usdt": total_pnl}
     ])[-20000:]
+    # 종목별 차트용 — 이미 조회한 현재가를 그대로 기록만 한다(추가 API 호출 없음).
+    position_history = state.setdefault("position_history", {})
+    trx_history = position_history.setdefault("TRX", [])
+    trx_history.append({"ts": now_iso(), "price": current_price, "unrealized_pnl_usdt": unrealized_now})
+    position_history["TRX"] = trx_history[-20000:]
 
     save_state(state)

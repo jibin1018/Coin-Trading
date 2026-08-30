@@ -241,6 +241,7 @@ def _total_equity_usdt(spot, fut) -> float:
 
 def _unrealized_price_pnl_usdt(state, spot, fut) -> float:
     total = 0.0
+    symbol_history = state.setdefault("position_history", {})
     for base, position in state["positions"].items():
         entry_spot = position.get("entry_spot_price", position.get("entry_price"))
         entry_perp = position.get("entry_perp_price", position.get("entry_price"))
@@ -255,6 +256,10 @@ def _unrealized_price_pnl_usdt(state, spot, fut) -> float:
         position_pnl = (current_spot - entry_spot) * amount + (entry_perp - current_perp) * amount
         position["unrealized_price_pnl_usdt"] = position_pnl
         total += position_pnl
+        # 종목별 차트용 — 이미 조회한 가격을 그대로 기록만 한다(추가 API 호출 없음).
+        base_history = symbol_history.setdefault(base, [])
+        base_history.append({"ts": now_iso(), "price": current_spot, "unrealized_pnl_usdt": position_pnl, "accrued_funding_usdt": position.get("accrued_funding_usdt", 0.0)})
+        symbol_history[base] = base_history[-20000:]
     return total
 
 

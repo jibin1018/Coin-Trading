@@ -17,6 +17,8 @@ _DEFAULT_STATE = {
     "pending_exits": [],     # 장마감후 스캔에서 청산 신호 뜬 종목, 다음 장시작에 매도
     "last_scan_date": None,  # "YYYY-MM-DD" — 일일 스캔 중복실행 방지
     "trade_log": [],
+    "equity_history": [],    # [{ts, total_pnl_krw}] — 대시보드 기간별(일/주/월/전체) 손익 차트용
+    "position_history": {},  # {symbol: [{ts, price, unrealized_pnl_krw}]} — 종목별 차트용
 }
 
 

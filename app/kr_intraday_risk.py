@@ -8,7 +8,7 @@ realized_pnl_krw를 이 파일에서 직접 추적하며, 계좌 자체(예수�
 from __future__ import annotations
 
 from app.kis_order import inquire_balance, inquire_price, place_order
-from app.kr_state import log_event, save_state
+from app.kr_state import log_event, now_iso, save_state
 from app.kr_watchlist import (
     ACNT_PRDT_CD, CANO, CAPITAL_BUDGET_KRW, MAX_CONCURRENT_POSITIONS, MAX_POSITION_FRACTION, RISK_PER_TRADE, STOP_PCT,
 )
@@ -64,7 +64,9 @@ def check_once(token: str, state: dict) -> None:
             _sell_all(token, state, symbol, held[symbol], price, "일봉신호")
         state["pending_exits"].remove(symbol)
 
-    # 2) 실시간 손절가 체크 (보유중인 종목만)
+    # 2) 실시간 손절가 체크 (보유중인 종목만) — 이미 조회한 가격을 종목별 차트 기록에도 재사용한다.
+    unrealized_pnl_krw = 0.0
+    position_history = state.setdefault("position_history", {})
     for symbol, stop in list(state["stop_price"].items()):
         if symbol not in held:
             continue
@@ -75,6 +77,17 @@ def check_once(token: str, state: dict) -> None:
             continue
         if price <= stop:
             _sell_all(token, state, symbol, held[symbol], price, f"손절@{stop:.0f}")
+            continue
+        symbol_unrealized = price * held[symbol] - state["entry_cost"].get(symbol, price * held[symbol])
+        unrealized_pnl_krw += symbol_unrealized
+        history = position_history.setdefault(symbol, [])
+        history.append({"ts": now_iso(), "price": price, "unrealized_pnl_krw": symbol_unrealized})
+        position_history[symbol] = history[-20000:]
+
+    total_pnl_krw = state.get("realized_pnl_krw", 0.0) + unrealized_pnl_krw
+    state["equity_history"] = (state.get("equity_history", []) + [
+        {"ts": now_iso(), "total_pnl_krw": total_pnl_krw}
+    ])[-20000:]
 
     # 3) 매도 반영된 최신 잔고/현금 + 자체 예산원장으로 신규진입 대기열 소비
     held, cash = _balance(token)

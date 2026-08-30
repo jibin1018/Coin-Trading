@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.kis_order import inquire_balance as inquire_balance_domestic
 from app.kis_overseas_order import MARKETABLE_LIMIT_BUFFER, inquire_balance, inquire_price, place_order
-from app.us_state import log_event, save_state
+from app.us_state import log_event, now_iso, save_state
 from app.us_watchlist import (
     ACNT_PRDT_CD, CANO, CAPITAL_BUDGET_USD, FX_KRW_PER_USD, MAX_CONCURRENT_POSITIONS,
     MAX_POSITION_FRACTION, RISK_PER_TRADE, STOCK_UNIVERSE, STOP_PCT,
@@ -82,6 +82,8 @@ def check_once(token: str, state: dict) -> None:
             _sell_all(token, state, symbol, held[symbol], price, "일봉신호")
         state["pending_exits"].remove(symbol)
 
+    unrealized_pnl_usd = 0.0
+    position_history = state.setdefault("position_history", {})
     for symbol, stop in list(state["stop_price"].items()):
         excd = _EXCD_BY_SYMBOL.get(symbol)
         if symbol not in held or excd is None:
@@ -93,6 +95,17 @@ def check_once(token: str, state: dict) -> None:
             continue
         if price <= stop:
             _sell_all(token, state, symbol, held[symbol], price, f"손절@{stop:.2f}")
+            continue
+        symbol_unrealized = price * held[symbol] - state["entry_cost"].get(symbol, price * held[symbol])
+        unrealized_pnl_usd += symbol_unrealized
+        history = position_history.setdefault(symbol, [])
+        history.append({"ts": now_iso(), "price": price, "unrealized_pnl_usd": symbol_unrealized})
+        position_history[symbol] = history[-20000:]
+
+    total_pnl_usd = state.get("realized_pnl_usd", 0.0) + unrealized_pnl_usd
+    state["equity_history"] = (state.get("equity_history", []) + [
+        {"ts": now_iso(), "total_pnl_usd": total_pnl_usd}
+    ])[-20000:]
 
     held, cash = _balance(token)
     budget = CAPITAL_BUDGET_USD + state.get("realized_pnl_usd", 0.0)

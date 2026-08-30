@@ -161,6 +161,17 @@ def run_cycle() -> None:
         {"ts": now_iso(), "total_pnl_usdt": total_pnl}
     ])[-2000:]
 
+    # 종목별 차트용 — 이미 조회한 가격을 그대로 기록만 한다(추가 API 호출 없음). 지금 보유중인
+    # 롱/숏 종목만 남긴다(47종목 전체를 다 남기면 상태파일이 불필요하게 커짐).
+    symbol_history = state.setdefault("position_history", {})
+    for symbol, pos in state["positions"].items():
+        price = prices.get(symbol)
+        if price is None:
+            continue
+        history = symbol_history.setdefault(symbol, [])
+        history.append({"ts": now_iso(), "price": price, "unrealized_pnl_usdt": pos.get("unrealized_pnl_usdt", 0.0)})
+        symbol_history[symbol] = history[-2000:]
+
     save_state(state)
 
 

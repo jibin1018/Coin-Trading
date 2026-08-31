@@ -83,6 +83,9 @@ def run_once(token: str | None = None) -> None:
     state["pending_entries"] = list(dict.fromkeys(state["pending_entries"] + new_entries))
     state["pending_exits"] = list(dict.fromkeys(state["pending_exits"] + new_exits))
     state["last_scan_date"] = today
+    # 종목코드가 숫자라 대시보드에서 못 알아보므로, 감시종목 전체의 코드->한글명을 매 스캔마다
+    # 새로 채워넣는다(정적 워치리스트라 매일 다시 써도 저렴하고, 누락 없이 항상 최신 유지).
+    state["symbol_names"] = {symbol: name for symbol, name in STOCK_UNIVERSE}
 
     if new_entries:
         log_event(state, f"[스캔] 신규진입 대기: {new_entries}")

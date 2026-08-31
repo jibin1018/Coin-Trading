@@ -145,5 +145,9 @@ def check_once(token: str, state: dict) -> None:
             slots -= 1
         else:
             log_event(state, f"[매수실패] {symbol}: {result.get('msg_cd')} {result.get('msg1')}")
+            # daily_scan에서 신호 감지 시점에 미리 넣어둔 stop_price가 남아있으면, entry_cost 없이도
+            # stopPrice만 보고 "보유 포지션"으로 렌더링하는 프런트엔드 표에 체결 안 된 종목이
+            # 마치 매수된 것처럼 계속 노출된다 — 매수 실패 시에도 진입스킵과 동일하게 정리한다.
+            state["stop_price"].pop(symbol, None)
 
     save_state(state)

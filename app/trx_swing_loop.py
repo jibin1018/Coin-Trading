@@ -11,15 +11,22 @@ import time
 import traceback
 
 from app.trx_swing_trade import run_cycle
+from app.watchdog import run_with_timeout
 
 CHECK_INTERVAL_SECONDS = int(os.environ.get("TRX_SWING_CHECK_INTERVAL_SECONDS", "300"))
+CYCLE_TIMEOUT_SECONDS = int(os.environ.get("TRX_SWING_CYCLE_TIMEOUT_SECONDS", "60"))
 
 
 def main() -> None:
     print(f"TRX 스윙 실계좌 봇 루프 시작 (사이클 주기 {CHECK_INTERVAL_SECONDS}초)", flush=True)
     while True:
         try:
-            run_cycle()
+            run_with_timeout(
+                run_cycle, CYCLE_TIMEOUT_SECONDS,
+                on_timeout=lambda: print(
+                    f"사이클이 {CYCLE_TIMEOUT_SECONDS}초 넘게 안 끝나 hang으로 보고 포기, 다음 사이클로 넘어감", flush=True,
+                ),
+            )
         except Exception:
             print("사이클 실행 중 오류 발생:", flush=True)
             traceback.print_exc()

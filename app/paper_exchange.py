@@ -24,6 +24,7 @@ def spot_client() -> ccxt.binance:
         "apiKey": os.environ["BINANCE_API_KEY"],
         "secret": os.environ["BINANCE_SECRET_KEY"],
         "enableRateLimit": True,
+        "timeout": 15000,
         "options": {"defaultType": "spot", "adjustForTimeDifference": True},
     })
 
@@ -34,5 +35,6 @@ def futures_client() -> ccxt.binance:
         "apiKey": os.environ["BINANCE_API_KEY"],
         "secret": os.environ["BINANCE_SECRET_KEY"],
         "enableRateLimit": True,
+        "timeout": 15000,
         "options": {"defaultType": "future", "adjustForTimeDifference": True},
     })

@@ -16,6 +16,7 @@ import pandas as pd
 
 from app.futures_data import fetch_perp_ohlcv
 from app.momentum_state import load_state, log_event, now_iso, save_state
+from app.watchdog import run_with_timeout
 
 UNIVERSE = [
     "BTC", "ETH", "BNB", "XRP", "SOL", "TRX", "DOGE", "ZEC", "LINK", "XMR",
@@ -31,6 +32,7 @@ TOP_K = 8
 COMMISSION_PCT = 0.04  # 편도, 리밸런스 회전분에만 적용(백테스트와 동일 가정)
 START_CAPITAL_USDT = float(os.environ.get("MOMENTUM_ROTATION_START_CAPITAL_USDT", "10000"))
 CHECK_INTERVAL_SECONDS = int(os.environ.get("MOMENTUM_ROTATION_CHECK_INTERVAL_SECONDS", "1800"))
+CYCLE_TIMEOUT_SECONDS = int(os.environ.get("MOMENTUM_ROTATION_CYCLE_TIMEOUT_SECONDS", "300"))
 SINCE_DAYS_FOR_MOMENTUM = LOOKBACK_DAYS + 10
 
 
@@ -179,7 +181,12 @@ def main() -> None:
     print(f"모멘텀 로테이션 페이퍼 루프 시작 (사이클 주기 {CHECK_INTERVAL_SECONDS}초)", flush=True)
     while True:
         try:
-            run_cycle()
+            run_with_timeout(
+                run_cycle, CYCLE_TIMEOUT_SECONDS,
+                on_timeout=lambda: print(
+                    f"사이클이 {CYCLE_TIMEOUT_SECONDS}초 넘게 안 끝나 hang으로 보고 포기, 다음 사이클로 넘어감", flush=True,
+                ),
+            )
         except Exception:
             import traceback
             print("사이클 실행 중 오류 발생:", flush=True)

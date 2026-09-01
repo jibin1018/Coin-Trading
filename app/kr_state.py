@@ -13,6 +13,8 @@ _DEFAULT_STATE = {
     "stop_price": {},        # {symbol: stop_price} — 보유중 종목의 실시간 손절가
     "entry_cost": {},        # {symbol: 매수원가(KRW)} — 실현손익 계산 + 예산 산정용
     "symbol_names": {},      # {symbol: 한글 종목명} — 대시보드에 숫자코드 대신 표시용, kr_daily_scan에서 채움
+    "tick_rank": [],         # 워치리스트 전체를 EMA9/21 근접도로 정렬한 순위 — kr_daily_scan이 매일 갱신,
+                              # tick_stream이 웹소켓 동시구독 한도 초과시 우선순위로 사용
     "realized_pnl_krw": 0.0,  # 누적 실현손익 — 예산이 이 값만큼 늘거나 줄어든다(kr_watchlist.CAPITAL_BUDGET_KRW 참고)
     "pending_entries": [],   # 장마감후 스캔에서 신규진입 신호 뜬 종목, 다음 장시작에 매수
     "pending_exits": [],     # 장마감후 스캔에서 청산 신호 뜬 종목, 다음 장시작에 매도

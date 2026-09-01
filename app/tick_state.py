@@ -1,4 +1,4 @@
-"""미국주식 스윙 자동매매 상태 저장소 — kr_state.py와 동일 패턴, 통화만 USD."""
+"""틱 웹소켓 수신 상태 저장소 — kr_state.py/us_state.py와 동일 패턴."""
 from __future__ import annotations
 
 import json
@@ -6,20 +6,12 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-STATE_PATH = Path(os.environ.get("US_SWING_STATE_PATH", "/app/data/us_swing_state.json"))
+STATE_PATH = Path(os.environ.get("TICK_STATE_PATH", "/app/data/tick_state.json"))
 
 _DEFAULT_STATE = {
-    "stop_price": {},        # {symbol: stop_price(USD)}
-    "entry_cost": {},        # {symbol: 매수원가(USD)}
-    "realized_pnl_usd": 0.0,  # 누적 실현손익 — 예산이 이 값만큼 늘거나 줄어든다
-    "pending_entries": [],
-    "pending_exits": [],
-    "last_scan_date": None,  # 미국 동부시간(America/New_York) 기준 "YYYY-MM-DD"
-    "tick_rank": [],         # 워치리스트 전체를 EMA9/21 근접도로 정렬한 순위 — us_daily_scan이 매일 갱신,
-                              # tick_stream이 웹소켓 동시구독 한도 초과시 우선순위로 사용
+    "ticks": {},        # {symbol: [{ts, price}]} — 심볼별 최근 체결틱 롤링버퍼
+    "subscribed": {"kr": [], "us": []},  # 최근 세션에서 실제 구독 성공한 종목
     "trade_log": [],
-    "equity_history": [],    # [{ts, total_pnl_usd}] — 대시보드 기간별(일/주/월/전체) 손익 차트용
-    "position_history": {},  # {symbol: [{ts, price, unrealized_pnl_usd}]} — 종목별 차트용
 }
 
 

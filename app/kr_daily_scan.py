@@ -42,6 +42,9 @@ def _signal(frame: pd.DataFrame) -> dict | None:
         "above_sma200": bool(close > sma200),
         "close": float(close),
         "last_date": str(enriched.index[-1].date()),
+        # EMA9/21이 얼마나 근접했는지(교차 임박도) — 작을수록 곧 골든/데드크로스날 가능성 높음.
+        # tick_stream 웹소켓 동시구독 한도 초과시 우선순위로 쓴다(신호 임박 종목부터 실시간 틱 확보).
+        "ema_gap_pct": abs(ema9 - ema21) / abs(ema21) if ema21 else float("inf"),
     }
 
 
@@ -59,6 +62,7 @@ def run_once(token: str | None = None) -> None:
 
     new_entries: list[str] = []
     new_exits: list[str] = []
+    rank_candidates: list[tuple[str, float]] = []
     for symbol, name in STOCK_UNIVERSE:
         try:
             frame = fetch_ohlcv_kis(symbol, token, since)
@@ -68,6 +72,7 @@ def run_once(token: str | None = None) -> None:
         sig = _signal(frame)
         if sig is None:
             continue
+        rank_candidates.append((symbol, sig["ema_gap_pct"]))
 
         if symbol in held:
             if sig["crossed_down"] or not sig["above_sma200"]:
@@ -86,6 +91,8 @@ def run_once(token: str | None = None) -> None:
     # 종목코드가 숫자라 대시보드에서 못 알아보므로, 감시종목 전체의 코드->한글명을 매 스캔마다
     # 새로 채워넣는다(정적 워치리스트라 매일 다시 써도 저렴하고, 누락 없이 항상 최신 유지).
     state["symbol_names"] = {symbol: name for symbol, name in STOCK_UNIVERSE}
+    rank_candidates.sort(key=lambda pair: pair[1])
+    state["tick_rank"] = [symbol for symbol, _ in rank_candidates]
 
     if new_entries:
         log_event(state, f"[스캔] 신규진입 대기: {new_entries}")

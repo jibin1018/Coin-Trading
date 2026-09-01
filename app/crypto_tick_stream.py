@@ -20,6 +20,7 @@ import json
 import websockets
 
 from app.crypto_tick_state import load_state, log_event, now_iso, save_state
+from app.tick_archive import append_batch
 from app.momentum_rotation_loop import UNIVERSE as MOMENTUM_UNIVERSE
 from app.paper_funding_arb import SYMBOLS as FUNDING_ARB_BASES
 
@@ -120,13 +121,22 @@ def _handle_futures_message(raw: str, buffer: dict[str, list[dict]], funding_buf
         funding_buffer.setdefault(base, []).append({"ts": now_iso(), "mark_price": mark_price, "funding_rate": funding_rate})
 
 
+def _archive_records(base: str, points: list[dict]) -> list[dict]:
+    return [{"symbol": base, **point} for point in points]
+
+
 def _flush(spot_buffer: dict[str, list[dict]], perp_buffer: dict[str, list[dict]], funding_buffer: dict[str, list[dict]]) -> None:
     if not spot_buffer and not perp_buffer and not funding_buffer:
         return
     state = load_state()
-    for key, buf in (("spot_ticks", spot_buffer), ("perp_ticks", perp_buffer), ("funding", funding_buffer)):
+    for key, buf, archive_category in (
+        ("spot_ticks", spot_buffer, "crypto_spot"),
+        ("perp_ticks", perp_buffer, "crypto_perp"),
+        ("funding", funding_buffer, "crypto_funding"),
+    ):
         store = state.setdefault(key, {})
         for base, points in buf.items():
+            append_batch(archive_category, _archive_records(base, points))
             history = store.setdefault(base, [])
             history.extend(points)
             store[base] = history[-MAX_TICKS_PER_SYMBOL:]

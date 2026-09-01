@@ -22,6 +22,7 @@ import websockets
 
 from app.kis_auth import VTS_BASE_URL, app_credentials
 from app.kr_state import load_state as load_kr_state
+from app.tick_archive import append_batch
 from app.tick_state import load_state, log_event, now_iso, save_state
 from app.us_state import load_state as load_us_state
 from app.us_watchlist import STOCK_UNIVERSE as US_UNIVERSE
@@ -100,9 +101,9 @@ def _ingest_tick(raw: str, buffer: dict[str, list[dict]]) -> None:
         return
     tr_id, count_str, data_blob = parts[1], parts[2], parts[3]
     if tr_id == KR_TR_ID:
-        symbol_idx, price_idx = KR_SYMBOL_IDX, KR_PRICE_IDX
+        symbol_idx, price_idx, market = KR_SYMBOL_IDX, KR_PRICE_IDX, "KR"
     elif tr_id == US_TR_ID:
-        symbol_idx, price_idx = US_SYMBOL_IDX, US_PRICE_IDX
+        symbol_idx, price_idx, market = US_SYMBOL_IDX, US_PRICE_IDX, "US"
     else:
         return
 
@@ -125,7 +126,7 @@ def _ingest_tick(raw: str, buffer: dict[str, list[dict]]) -> None:
             price = float(record[price_idx])
         except ValueError:
             continue
-        buffer.setdefault(symbol, []).append({"ts": ts, "price": price})
+        buffer.setdefault(symbol, []).append({"ts": ts, "price": price, "market": market})
 
 
 def _flush_ticks(buffer: dict[str, list[dict]]) -> None:
@@ -134,6 +135,10 @@ def _flush_ticks(buffer: dict[str, list[dict]]) -> None:
     state = load_state()
     ticks = state.setdefault("ticks", {})
     for symbol, points in buffer.items():
+        for market, category in (("KR", "kr"), ("US", "us")):
+            market_points = [p for p in points if p.get("market") == market]
+            if market_points:
+                append_batch(category, [{"symbol": symbol, "ts": p["ts"], "price": p["price"]} for p in market_points])
         history = ticks.setdefault(symbol, [])
         history.extend(points)
         ticks[symbol] = history[-MAX_TICKS_PER_SYMBOL:]

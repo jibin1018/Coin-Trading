@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from app.kis_order import inquire_balance as inquire_balance_domestic
-from app.kis_overseas_order import MARKETABLE_LIMIT_BUFFER, inquire_balance, inquire_price, place_order
+from app.kis_overseas_order import (
+    MARKETABLE_LIMIT_BUFFER, inquire_balance, inquire_price, inquire_psamount, place_order,
+)
 from app.us_state import log_event, now_iso, save_state
 from app.us_watchlist import (
     ACNT_PRDT_CD, CANO, CAPITAL_BUDGET_USD, FX_KRW_PER_USD, MAX_CONCURRENT_POSITIONS,
@@ -133,6 +135,25 @@ def check_once(token: str, state: dict) -> None:
             state["stop_price"].pop(symbol, None)
             continue
         limit_price = price * (1 + MARKETABLE_LIMIT_BUFFER)
+        try:
+            ps = inquire_psamount(token, CANO, ACNT_PRDT_CD, excd, symbol, limit_price)
+        except Exception as exc:  # noqa: BLE001
+            log_event(state, f"[매수가능금액조회실패] {symbol}: {exc}")
+            continue
+        if ps.get("rt_cd") != "0":
+            log_event(state, f"[매수가능금액조회실패] {symbol}: {ps.get('msg_cd')} {ps.get('msg1')}")
+            continue
+        # 예산캡(spendable*fraction)은 전략상 리스크 배분일 뿐, 계좌가 실제로 보유한 외화가
+        # 그보다 적으면(모의투자는 KRW예수금뿐이라 환율근사가 실제 외화잔고와 어긋남) 주문이
+        # "모의투자 주문가능금액이 부족합니다"로 거부된다 — KIS가 인정하는 진짜 최대수량으로 축소한다.
+        real_max_qty = int(float(ps.get("output", {}).get("max_ord_psbl_qty", "0") or "0"))
+        if real_max_qty < qty:
+            log_event(state, f"[수량조정] {symbol}: 예산기준 {qty}주 -> 실제주문가능 {real_max_qty}주로 축소")
+            qty = real_max_qty
+        if qty < 1:
+            log_event(state, f"[진입스킵] {symbol}: 실제 주문가능수량 0 (KIS 매수가능금액조회 기준)")
+            state["stop_price"].pop(symbol, None)
+            continue
         result = place_order(token, CANO, ACNT_PRDT_CD, symbol, excd, "buy", qty, limit_price)
         if result.get("rt_cd") == "0":
             cost = qty * price

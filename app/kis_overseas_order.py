@@ -21,6 +21,7 @@ BUY_TR_ID = "VTTT1002U"
 SELL_TR_ID = "VTTT1001U"
 BALANCE_TR_ID = "VTTS3012R"
 PRICE_TR_ID = "HHDFS00000300"
+PSAMOUNT_TR_ID = "VTTS3007R"  # 모의투자 해외주식 매수가능금액조회 [v1_해외주식-014]
 
 _ORDER_EXCG_MAP = {"NAS": "NASD", "NYS": "NYSE"}
 MARKETABLE_LIMIT_BUFFER = 0.01  # 즉시체결 유도용 지정가 버퍼(매수 +1%, 매도 -1%)
@@ -75,6 +76,27 @@ def place_order(token: str, cano: str, acnt_prdt_cd: str, symbol: str, excd: str
         f"{VTS_BASE_URL}/uapi/overseas-stock/v1/trading/order",
         headers=_headers(token, tr_id),
         data=json.dumps(body),
+    )
+    return resp.json()
+
+
+def inquire_psamount(token: str, cano: str, acnt_prdt_cd: str, excd: str, symbol: str,
+                      unit_price: float) -> dict:
+    """계좌 KRW예수금/환율 근사치가 아니라 KIS가 실제로 인정하는 주문가능금액을 직접 조회한다
+    (모의투자 계좌는 별도 USD 잔고가 없어 근사치와 실제 심사 기준이 어긋나 매수가 '주문가능금액
+    부족'으로 거부되는 문제 때문 — output.max_ord_psbl_qty가 그 주문의 진짜 최대체결가능수량)."""
+    ovrs_excg_cd = _ORDER_EXCG_MAP[excd]
+    resp = throttled_request(
+        "GET",
+        f"{VTS_BASE_URL}/uapi/overseas-stock/v1/trading/inquire-psamount",
+        headers=_headers(token, PSAMOUNT_TR_ID),
+        params={
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "OVRS_EXCG_CD": ovrs_excg_cd,
+            "OVRS_ORD_UNPR": f"{unit_price:.2f}",
+            "ITEM_CD": symbol,
+        },
     )
     return resp.json()
 

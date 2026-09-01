@@ -14,9 +14,30 @@ from datetime import datetime, timedelta, timezone
 import ccxt
 import pandas as pd
 
+from app.crypto_tick_state import load_state as load_tick_state
 from app.futures_data import fetch_perp_ohlcv
 from app.momentum_state import load_state, log_event, now_iso, save_state
 from app.watchdog import run_with_timeout
+
+# crypto_tick_stream.py가 이 시간 안에 갱신한 선물 체결틱이 있으면 REST fetch_ticker 대신 씀.
+_TICK_STALE_SECONDS = 90
+
+
+def _tick_price(tick_state: dict, base: str) -> float | None:
+    points = tick_state.get("perp_ticks", {}).get(base)
+    if not points:
+        return None
+    last = points[-1]
+    try:
+        ts = datetime.fromisoformat(last["ts"])
+    except (KeyError, ValueError):
+        return None
+    if (datetime.now(timezone.utc) - ts).total_seconds() > _TICK_STALE_SECONDS:
+        return None
+    try:
+        return float(last["price"])
+    except (KeyError, ValueError, TypeError):
+        return None
 
 UNIVERSE = [
     "BTC", "ETH", "BNB", "XRP", "SOL", "TRX", "DOGE", "ZEC", "LINK", "XMR",
@@ -41,9 +62,25 @@ def _perp_symbol(base: str) -> str:
 
 
 def _fetch_current_prices() -> dict[str, float]:
-    exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+    try:
+        tick_state = load_tick_state()
+    except Exception:  # noqa: BLE001
+        tick_state = {}
+
     prices = {}
+    missing = []
     for base in UNIVERSE:
+        tick = _tick_price(tick_state, base)
+        if tick is not None:
+            prices[base] = tick
+        else:
+            missing.append(base)
+
+    if not missing:
+        return prices
+
+    exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
+    for base in missing:
         try:
             ticker = exchange.fetch_ticker(_perp_symbol(base))
             prices[base] = ticker["last"]

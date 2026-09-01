@@ -7,12 +7,42 @@ realized_pnl_krw를 이 파일에서 직접 추적하며, 계좌 자체(예수�
 브로커 잔고의 매입금액합계가 아니라 이 상태파일의 자체 원장을 예산 판단 기준으로 쓴다."""
 from __future__ import annotations
 
+import datetime as dt
+
 from app.kis_order import inquire_balance, inquire_price, place_order
 from app.kr_state import log_event, now_iso, save_state
 from app.kr_watchlist import (
     ACNT_PRDT_CD, CANO, CAPITAL_BUDGET_KRW, MAX_CONCURRENT_POSITIONS, MAX_POSITION_FRACTION, RISK_PER_TRADE, STOP_PCT,
 )
 from app.strategies import _risk_sized_fraction
+from app.tick_state import load_state as load_tick_state
+
+# 웹소켓 틱(tick_stream.py)이 이 시간 안에 갱신됐으면 REST 시세조회 대신 그 값을 쓴다 —
+# tick_stream의 30초 플러시 주기를 감안한 여유치. 구독 안 된 종목/틱스트림 장애시엔
+# 자동으로 REST(inquire_price)로 폴백한다.
+_TICK_STALE_SECONDS = 90
+
+
+def _tick_price(tick_state: dict, symbol: str) -> float | None:
+    points = tick_state.get("ticks", {}).get(symbol)
+    if not points:
+        return None
+    last = points[-1]
+    try:
+        ts = dt.datetime.fromisoformat(last["ts"])
+    except (KeyError, ValueError):
+        return None
+    if (dt.datetime.now(dt.timezone.utc) - ts).total_seconds() > _TICK_STALE_SECONDS:
+        return None
+    try:
+        return float(last["price"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _price(token: str, symbol: str, tick_state: dict) -> float:
+    tick = _tick_price(tick_state, symbol)
+    return tick if tick is not None else inquire_price(token, symbol)
 
 
 def _balance(token: str) -> tuple[dict[str, int], float]:
@@ -39,13 +69,17 @@ def _sell_all(token: str, state: dict, symbol: str, qty: int, price: float, reas
 
 def check_once(token: str, state: dict) -> None:
     held, _ = _balance(token)
+    try:
+        tick_state = load_tick_state()
+    except Exception:  # noqa: BLE001
+        tick_state = {}
 
     # 0) 상태파일이 유실된 채로 재시작된 경우(보유중인데 stop_price/entry_cost 기억이 없는 종목) 대비 —
     # 브로커 잔고가 진실 소스이므로, 빠진 종목은 현재가 기준으로 복구해 감시 공백을 막는다.
     for symbol, qty in held.items():
         if symbol not in state["stop_price"] or symbol not in state["entry_cost"]:
             try:
-                price = inquire_price(token, symbol)
+                price = _price(token, symbol, tick_state)
             except Exception as exc:  # noqa: BLE001
                 log_event(state, f"[현재가조회실패] {symbol}: {exc}")
                 continue
@@ -57,7 +91,7 @@ def check_once(token: str, state: dict) -> None:
     for symbol in list(state["pending_exits"]):
         if symbol in held:
             try:
-                price = inquire_price(token, symbol)
+                price = _price(token, symbol, tick_state)
             except Exception as exc:  # noqa: BLE001
                 log_event(state, f"[현재가조회실패] {symbol}: {exc}")
                 continue
@@ -71,7 +105,7 @@ def check_once(token: str, state: dict) -> None:
         if symbol not in held:
             continue
         try:
-            price = inquire_price(token, symbol)
+            price = _price(token, symbol, tick_state)
         except Exception as exc:  # noqa: BLE001
             log_event(state, f"[현재가조회실패] {symbol}: {exc}")
             continue
@@ -102,7 +136,7 @@ def check_once(token: str, state: dict) -> None:
             state["pending_entries"].remove(symbol)
             continue
         try:
-            price = inquire_price(token, symbol)
+            price = _price(token, symbol, tick_state)
         except Exception as exc:  # noqa: BLE001
             log_event(state, f"[현재가조회실패] {symbol}: {exc}")
             continue

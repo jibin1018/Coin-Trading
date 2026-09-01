@@ -2,10 +2,13 @@
 모의투자는 지정가만 되므로 매수는 현재가+1%, 매도는 현재가-1%로 넣어 즉시체결을 유도한다."""
 from __future__ import annotations
 
+import datetime as dt
+
 from app.kis_order import inquire_balance as inquire_balance_domestic
 from app.kis_overseas_order import (
     MARKETABLE_LIMIT_BUFFER, inquire_balance, inquire_price, inquire_psamount, place_order,
 )
+from app.tick_state import load_state as load_tick_state
 from app.us_state import log_event, now_iso, save_state
 from app.us_watchlist import (
     ACNT_PRDT_CD, CANO, CAPITAL_BUDGET_USD, FX_KRW_PER_USD, MAX_CONCURRENT_POSITIONS,
@@ -14,6 +17,31 @@ from app.us_watchlist import (
 from app.strategies import _risk_sized_fraction
 
 _EXCD_BY_SYMBOL = {symbol: excd for symbol, excd, _ in STOCK_UNIVERSE}
+
+# kr_intraday_risk.py와 동일 이유 — tick_stream.py가 90초 안에 갱신한 틱이 있으면 REST 대신 씀.
+_TICK_STALE_SECONDS = 90
+
+
+def _tick_price(tick_state: dict, symbol: str) -> float | None:
+    points = tick_state.get("ticks", {}).get(symbol)
+    if not points:
+        return None
+    last = points[-1]
+    try:
+        ts = dt.datetime.fromisoformat(last["ts"])
+    except (KeyError, ValueError):
+        return None
+    if (dt.datetime.now(dt.timezone.utc) - ts).total_seconds() > _TICK_STALE_SECONDS:
+        return None
+    try:
+        return float(last["price"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _price(token: str, symbol: str, excd: str, tick_state: dict) -> float:
+    tick = _tick_price(tick_state, symbol)
+    return tick if tick is not None else inquire_price(token, symbol, excd)
 
 
 def _balance(token: str) -> tuple[dict[str, int], float]:
@@ -58,6 +86,10 @@ def _sell_all(token: str, state: dict, symbol: str, qty: int, price: float, reas
 
 def check_once(token: str, state: dict) -> None:
     held, _ = _balance(token)
+    try:
+        tick_state = load_tick_state()
+    except Exception:  # noqa: BLE001
+        tick_state = {}
 
     for symbol, qty in held.items():
         excd = _EXCD_BY_SYMBOL.get(symbol)
@@ -65,7 +97,7 @@ def check_once(token: str, state: dict) -> None:
             continue
         if symbol not in state["stop_price"] or symbol not in state["entry_cost"]:
             try:
-                price = inquire_price(token, symbol, excd)
+                price = _price(token, symbol, excd, tick_state)
             except Exception as exc:  # noqa: BLE001
                 log_event(state, f"[현재가조회실패] {symbol}: {exc}")
                 continue
@@ -77,7 +109,7 @@ def check_once(token: str, state: dict) -> None:
         excd = _EXCD_BY_SYMBOL.get(symbol)
         if symbol in held and excd:
             try:
-                price = inquire_price(token, symbol, excd)
+                price = _price(token, symbol, excd, tick_state)
             except Exception as exc:  # noqa: BLE001
                 log_event(state, f"[현재가조회실패] {symbol}: {exc}")
                 continue
@@ -91,7 +123,7 @@ def check_once(token: str, state: dict) -> None:
         if symbol not in held or excd is None:
             continue
         try:
-            price = inquire_price(token, symbol, excd)
+            price = _price(token, symbol, excd, tick_state)
         except Exception as exc:  # noqa: BLE001
             log_event(state, f"[현재가조회실패] {symbol}: {exc}")
             continue
@@ -122,7 +154,7 @@ def check_once(token: str, state: dict) -> None:
             state["pending_entries"].remove(symbol)
             continue
         try:
-            price = inquire_price(token, symbol, excd)
+            price = _price(token, symbol, excd, tick_state)
         except Exception as exc:  # noqa: BLE001
             log_event(state, f"[현재가조회실패] {symbol}: {exc}")
             continue

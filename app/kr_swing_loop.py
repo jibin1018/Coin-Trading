@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import time
 from zoneinfo import ZoneInfo
 
@@ -16,13 +17,18 @@ from app.kis_auth import issue_token
 from app.kr_daily_scan import run_once as run_daily_scan
 from app.kr_intraday_risk import check_once as run_intraday_risk
 from app.kr_state import load_state, log_event, save_state
+from app.watchdog import run_with_timeout
 
 KST = ZoneInfo("Asia/Seoul")
 MARKET_OPEN = dt.time(9, 0)
 MARKET_CLOSE_FOR_RISK = dt.time(15, 20)
 SCAN_AFTER = dt.time(15, 35)
-LOOP_SLEEP_SECONDS = 60
+# 장중 실시간 손절 체크 주기 — tick_stream.py 웹소켓 틱을 우선 쓰게 되면서(kr_intraday_risk.py)
+# REST 호출이 크게 줄어, 예전 60초보다 훨씬 짧게 돌려도 KIS 호출한도에 안 걸린다.
+LOOP_SLEEP_SECONDS = int(os.environ.get("KR_SWING_LOOP_SLEEP_SECONDS", "10"))
 TOKEN_TTL_SECONDS = 12 * 3600
+INTRADAY_TIMEOUT_SECONDS = 30
+SCAN_TIMEOUT_SECONDS = 120
 
 
 def main() -> None:
@@ -44,9 +50,15 @@ def main() -> None:
 
             if is_weekday and MARKET_OPEN <= now.time() <= MARKET_CLOSE_FOR_RISK:
                 state = load_state()
-                run_intraday_risk(token, state)
+                run_with_timeout(
+                    lambda: run_intraday_risk(token, state), INTRADAY_TIMEOUT_SECONDS,
+                    on_timeout=lambda: print(f"[경고] 장중 리스크체크가 {INTRADAY_TIMEOUT_SECONDS}초 넘게 안 끝나 hang으로 보고 포기", flush=True),
+                )
             elif is_weekday and now.time() >= SCAN_AFTER:
-                run_daily_scan(token)
+                run_with_timeout(
+                    lambda: run_daily_scan(token), SCAN_TIMEOUT_SECONDS,
+                    on_timeout=lambda: print(f"[경고] 일일스캔이 {SCAN_TIMEOUT_SECONDS}초 넘게 안 끝나 hang으로 보고 포기", flush=True),
+                )
         except Exception as exc:  # noqa: BLE001 — 한 사이클 실패로 루프 전체가 죽지 않게
             state = load_state()
             log_event(state, f"[오류] 루프 사이클 실패: {exc}")

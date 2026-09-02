@@ -150,8 +150,11 @@ def apply_targets(client, prices: dict, targets: dict, notional_per_pos: float,
         min_cost = (limits.get("cost", {}) or {}).get("min") or 5.0
         min_amount = (limits.get("amount", {}) or {}).get("min") or 0.0
         amount = notional_per_pos / price
-        if notional_per_pos < min_cost or amount < min_amount:
-            result["skipped"].append(f"{base}(최소주문 미달 ${notional_per_pos:.2f}<${min_cost})")
+        if notional_per_pos < min_cost:
+            result["skipped"].append(f"{base}(명목 ${notional_per_pos:.2f} < 최소 ${min_cost})")
+            continue
+        if amount < min_amount:
+            result["skipped"].append(f"{base}(수량 {amount:.6g} < 최소 {min_amount:g}, 명목 ${notional_per_pos:.2f})")
             continue
 
         try:

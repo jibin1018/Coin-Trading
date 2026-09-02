@@ -16,13 +16,15 @@ import time
 import ccxt
 import pandas as pd
 
+from app.data import _parse_ts
+
 MAX_PAGES = 800
 
 
 def fetch_perp_ohlcv(symbol: str, timeframe: str, since_iso: str, until_iso: str | None = None) -> pd.DataFrame:
     exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
-    since = exchange.parse8601(since_iso)
-    until = exchange.parse8601(until_iso) if until_iso else exchange.milliseconds()
+    since = _parse_ts(exchange, since_iso)
+    until = _parse_ts(exchange, until_iso) if until_iso else exchange.milliseconds()
     rows: list[list[float]] = []
     for _ in range(MAX_PAGES):
         batch = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=1000)

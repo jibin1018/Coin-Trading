@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import statistics
 
 import pandas as pd
@@ -35,10 +36,13 @@ from app.data import fetch_ohlcv
 from app.mach7_indicators import add_mach7_ma_pullback
 from app.momentum_rotation_loop import UNIVERSE
 
-SINCE = "2020-01-01"
+# 구간은 환경변수로 조절: 강세장 슬라이스(LAB_SINCE=2020-01-01 LAB_UNTIL=2021-11-30) 등.
+SINCE = os.environ.get("LAB_SINCE", "2020-01-01")
+UNTIL = os.environ.get("LAB_UNTIL") or None
+LABEL = os.environ.get("LAB_LABEL", f"{SINCE}~{UNTIL or 'now'}")
 INITIAL_CAPITAL = 10_000.0
 FEE_PCT = 0.1
-MIN_BARS = 260
+MIN_BARS = int(os.environ.get("LAB_MIN_BARS", "260"))
 
 # 고정 신호 파라미터(스윕에서 그럭저럭 나온 값)
 EMA_FAST, EMA_MID, EMA_SLOW = 10, 50, 200
@@ -153,11 +157,11 @@ def _simulate(df: pd.DataFrame, allow_entry: pd.Series, stop_mode: str, exit_mod
 
 
 def run() -> None:
-    print(f"코인 {len(UNIVERSE)}종목 데이터 로드...")
+    print(f"[{LABEL}] 코인 {len(UNIVERSE)}종목 데이터 로드...")
     raw: dict[str, pd.DataFrame] = {}
     for base in UNIVERSE:
         try:
-            fr = fetch_ohlcv(f"{base}/USDT", "1d", SINCE)
+            fr = fetch_ohlcv(f"{base}/USDT", "1d", SINCE, UNTIL)
         except Exception as exc:  # noqa: BLE001
             print(f"  {base}: 실패 {exc}")
             continue

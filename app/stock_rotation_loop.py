@@ -390,6 +390,7 @@ def main() -> None:
 
     token = issue_token()
     token_at = time.monotonic()
+    last_snapshot = 0.0
 
     while True:
         try:
@@ -406,9 +407,21 @@ def main() -> None:
                     else:
                         _record_equity(token, state)
                         save_state(state)
+                    last_snapshot = time.monotonic()
                 elif now.time() >= PLAN_AFTER:
                     state = load_state()
                     plan_rebalance(token, state)
+                    state = load_state()
+                    _record_equity(token, state)
+                    save_state(state)
+                    last_snapshot = time.monotonic()
+
+            # 장 시간 밖이어도 15분마다 잔고 스냅샷은 갱신(대시보드가 최신 잔고를 보게).
+            if time.monotonic() - last_snapshot > 900:
+                state = load_state()
+                _record_equity(token, state)
+                save_state(state)
+                last_snapshot = time.monotonic()
         except Exception as exc:  # noqa: BLE001
             state = load_state()
             log_event(state, f"[{MARKET}] 루프 사이클 실패: {exc}")

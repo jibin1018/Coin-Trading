@@ -5,3 +5,6 @@ venv/
 *.egg-info/
 .pytest_cache/
 .DS_Store
+
+# Claude Code worktrees/런타임
+.claude/

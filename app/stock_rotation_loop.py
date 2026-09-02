@@ -78,26 +78,88 @@ _EXCD = {s: e for s, _, e in _universe()}
 _NAMES = {s: n for s, n, _ in _universe()}
 
 
-def _held(token: str) -> dict[str, int]:
+def _f(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def broker_snapshot(token: str) -> dict:
+    """KIS 잔고 API 한 번으로 실보유/평가/현금을 그대로 가져온다(자체 계산 아님).
+
+    반환:
+      positions   {symbol: {qty, price, eval_amt, purchase_amt, pnl, pnl_pct}}  (통화: KR=KRW, US=USD)
+      held        {symbol: qty}
+      unrealized  평가손익 합계 (API 제공값 합)
+      pos_eval    평가금액 합
+      account_cash_krw / account_total_krw   계좌 전체(국장/미장 공용) — KIS 국내잔고 API 제공값
+      queried_ts
+    """
+    positions: dict[str, dict] = {}
+    account_cash_krw = 0.0
+    account_total_krw = 0.0
+
     if MARKET == "KR":
         from app.kis_order import inquire_balance
         from app.kr_watchlist import ACNT_PRDT_CD, CANO
         body = inquire_balance(token, CANO, ACNT_PRDT_CD)
         if body.get("rt_cd") != "0":
             raise RuntimeError(f"잔고조회 실패: {body.get('msg_cd')} {body.get('msg1')}")
-        return {r["pdno"]: int(r["hldg_qty"]) for r in body.get("output1", []) if int(r.get("hldg_qty", "0")) > 0}
-    from app.kis_overseas_order import inquire_balance
-    from app.us_watchlist import ACNT_PRDT_CD, CANO
-    out: dict[str, int] = {}
-    for excd in ("NASD", "NYSE"):
-        body = inquire_balance(token, CANO, ACNT_PRDT_CD, excd)
-        if body.get("rt_cd") != "0":
-            raise RuntimeError(f"해외잔고조회 실패({excd}): {body.get('msg_cd')} {body.get('msg1')}")
         for r in body.get("output1", []):
-            qty = int(float(r.get("ovrs_cblc_qty", "0")))
-            if qty > 0:
-                out[r["ovrs_pdno"]] = qty
-    return out
+            qty = int(_f(r.get("hldg_qty")))
+            if qty <= 0:
+                continue
+            positions[r["pdno"]] = {
+                "qty": qty, "price": _f(r.get("prpr")),
+                "eval_amt": _f(r.get("evlu_amt")), "purchase_amt": _f(r.get("pchs_amt")),
+                "pnl": _f(r.get("evlu_pfls_amt")), "pnl_pct": _f(r.get("evlu_pfls_rt")),
+            }
+        o2 = (body.get("output2") or [{}])[0]
+        account_cash_krw = _f(o2.get("dnca_tot_amt"))
+        account_total_krw = _f(o2.get("tot_evlu_amt"))
+    else:
+        from app.kis_order import inquire_balance as inquire_balance_krw
+        from app.kis_overseas_order import inquire_balance
+        from app.us_watchlist import ACNT_PRDT_CD, CANO
+        for excd in ("NASD", "NYSE"):
+            body = inquire_balance(token, CANO, ACNT_PRDT_CD, excd)
+            if body.get("rt_cd") != "0":
+                raise RuntimeError(f"해외잔고조회 실패({excd}): {body.get('msg_cd')} {body.get('msg1')}")
+            for r in body.get("output1", []):
+                qty = int(_f(r.get("ovrs_cblc_qty")))
+                if qty <= 0:
+                    continue
+                positions[r["ovrs_pdno"]] = {
+                    "qty": qty, "price": _f(r.get("now_pric2")),
+                    "eval_amt": _f(r.get("ovrs_stck_evlu_amt")), "purchase_amt": _f(r.get("frcr_pchs_amt1")),
+                    "pnl": _f(r.get("frcr_evlu_pfls_amt")), "pnl_pct": _f(r.get("evlu_pfls_rt")),
+                }
+        try:
+            kb = inquire_balance_krw(token, CANO, ACNT_PRDT_CD)
+            ko2 = (kb.get("output2") or [{}])[0]
+            account_cash_krw = _f(ko2.get("dnca_tot_amt"))
+            account_total_krw = _f(ko2.get("tot_evlu_amt"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 이 전략 유니버스 종목만
+    positions = {s: p for s, p in positions.items() if s in _NAMES}
+    pos_eval = sum(p["eval_amt"] for p in positions.values())
+    unrealized = sum(p["pnl"] for p in positions.values())
+    return {
+        "positions": positions,
+        "held": {s: p["qty"] for s, p in positions.items()},
+        "unrealized": unrealized,
+        "pos_eval": pos_eval,
+        "account_cash_krw": account_cash_krw,
+        "account_total_krw": account_total_krw,
+        "queried_ts": now_iso(),
+    }
+
+
+def _held(token: str) -> dict[str, int]:
+    return broker_snapshot(token)["held"]
 
 
 def _price(token: str, symbol: str) -> float:
@@ -219,22 +281,36 @@ def plan_rebalance(token: str, state: dict) -> None:
     save_state(state)
 
 
-def _record_equity(token: str, state: dict, held: dict[str, int]) -> None:
-    unrealized = 0.0
+def _record_equity(token: str, state: dict, snap: dict | None = None) -> None:
+    """잔고 API 스냅샷을 그대로 state["broker"]에 박고, 평가·손익도 API 제공값을 쓴다."""
+    if snap is None:
+        snap = broker_snapshot(token)
+
+    unrealized = snap["unrealized"]              # API 평가손익 합
+    realized = state.get("realized_pnl", 0.0)    # 체결 원장(브로커가 전략별 태깅 불가)
+    total = realized + unrealized
+    strategy_equity = BUDGET + total             # 배정예산 기준 전략 equity
+    deployed = snap["pos_eval"]                  # API 평가금액 합
+
+    state["broker"] = {
+        "queried_ts": snap["queried_ts"],
+        "positions": snap["positions"],
+        "positions_eval": deployed,
+        "positions_unrealized_pnl": unrealized,
+        "account_cash_krw": snap["account_cash_krw"],
+        "account_total_krw": snap["account_total_krw"],
+    }
+    state["held_symbols"] = sorted(snap["held"])
+    state["unrealized_pnl"] = unrealized
+    state["equity"] = strategy_equity
+    state["deployed_value"] = deployed
+
     hist = state.setdefault("position_history", {})
-    for symbol, qty in held.items():
-        try:
-            price = _price(token, symbol)
-        except Exception:  # noqa: BLE001
-            continue
-        cost = state["entry_cost"].get(symbol, price * qty)
-        pnl = price * qty - cost
-        unrealized += pnl
-        hist.setdefault(symbol, []).append({"ts": now_iso(), "price": price, "unrealized_pnl": pnl})
+    for symbol, p in snap["positions"].items():
+        hist.setdefault(symbol, []).append({"ts": now_iso(), "price": p["price"], "unrealized_pnl": p["pnl"]})
         hist[symbol] = hist[symbol][-20000:]
-    total = state.get("realized_pnl", 0.0) + unrealized
     state["equity_history"] = (state.get("equity_history", []) + [
-        {"ts": now_iso(), "total_pnl": total, "equity": BUDGET + total}
+        {"ts": now_iso(), "total_pnl": total, "equity": strategy_equity, "deployed": deployed}
     ])[-20000:]
 
 
@@ -295,12 +371,13 @@ def consume_queue(token: str, state: dict) -> None:
             log_event(state, f"[{MARKET} 매수실패] {symbol}: {res.get('msg_cd')} {res.get('msg1')}")
             state["pending_buys"].remove(symbol)
 
+    snap = broker_snapshot(token)
     if not state.get("pending_sells") and not state.get("pending_buys"):
         if state.get("last_plan_date") and state.get("last_rebalance_date") != state["last_plan_date"]:
             state["last_rebalance_date"] = state["last_plan_date"]
-            log_event(state, f"[{MARKET}] 리밸런스 완료 — 보유 {sorted(_held(token))}")
+            log_event(state, f"[{MARKET}] 리밸런스 완료 — 보유 {sorted(snap['held'])}")
 
-    _record_equity(token, state, _held(token))
+    _record_equity(token, state, snap)
     save_state(state)
     _ = did_something
 
@@ -327,7 +404,7 @@ def main() -> None:
                     if state.get("pending_sells") or state.get("pending_buys"):
                         consume_queue(token, state)
                     else:
-                        _record_equity(token, state, _held(token))
+                        _record_equity(token, state)
                         save_state(state)
                 elif now.time() >= PLAN_AFTER:
                     state = load_state()

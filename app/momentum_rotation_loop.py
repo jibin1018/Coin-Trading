@@ -56,6 +56,16 @@ CHECK_INTERVAL_SECONDS = int(os.environ.get("MOMENTUM_ROTATION_CHECK_INTERVAL_SE
 CYCLE_TIMEOUT_SECONDS = int(os.environ.get("MOMENTUM_ROTATION_CYCLE_TIMEOUT_SECONDS", "300"))
 SINCE_DAYS_FOR_MOMENTUM = LOOKBACK_DAYS + 10
 
+# --- 실거래 설정 ---
+LIVE = os.environ.get("MOMENTUM_ROTATION_LIVE", "false").lower() == "true"
+EXCHANGE_MODE = os.environ.get("MOMENTUM_ROTATION_EXCHANGE", "testnet")  # testnet | mainnet
+LEVERAGE = int(os.environ.get("MOMENTUM_ROTATION_LEVERAGE", "1"))
+# 안전 상한: 선물지갑에 이보다 많이 들어있어도 이 금액까지만 굴린다(0 = 무제한).
+MAX_DEPLOY_USDT = float(os.environ.get("MOMENTUM_ROTATION_MAX_DEPLOY_USDT", "0"))
+DELEVER_DD = float(os.environ.get("MOMENTUM_ROTATION_DELEVER_DD", "0.20"))
+KILL_DD = float(os.environ.get("MOMENTUM_ROTATION_KILL_DD", "0.35"))
+RESET_HALT = os.environ.get("MOMENTUM_ROTATION_RESET_HALT", "false").lower() == "true"
+
 
 def _perp_symbol(base: str) -> str:
     return f"{base}/USDT:USDT"
@@ -80,12 +90,21 @@ def _fetch_current_prices() -> dict[str, float]:
         return prices
 
     exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "future"}})
-    for base in missing:
-        try:
-            ticker = exchange.fetch_ticker(_perp_symbol(base))
-            prices[base] = ticker["last"]
-        except Exception as exc:  # noqa: BLE001
-            print(f"  {base}: 시세조회 실패 ({exc})", flush=True)
+    want = {_perp_symbol(b): b for b in missing}
+    try:
+        # 47종목을 개별 fetch_ticker 로 부르면 IP 밴(-1003) 위험 — 한 번에 받는다.
+        tickers = exchange.fetch_tickers(list(want))
+        for symbol, base in want.items():
+            last = (tickers.get(symbol) or {}).get("last")
+            if last:
+                prices[base] = last
+    except Exception as exc:  # noqa: BLE001
+        print(f"  일괄 시세조회 실패, 개별 폴백 ({exc})", flush=True)
+        for symbol, base in want.items():
+            try:
+                prices[base] = exchange.fetch_ticker(symbol)["last"]
+            except Exception as exc2:  # noqa: BLE001
+                print(f"  {base}: 시세조회 실패 ({exc2})", flush=True)
     return prices
 
 
@@ -167,18 +186,138 @@ def _rebalance(state: dict, prices: dict[str, float]) -> None:
     )
 
 
-def run_cycle() -> None:
-    state = load_state()
+def _target_sides() -> dict[str, str] | None:
+    """모멘텀 랭킹 → {base: 'long'|'short'}. 데이터 부족이면 None."""
+    momentum = _fetch_momentum_ranking()
+    if len(momentum) < TOP_K * 2:
+        return None
+    ranked = momentum.sort_values(ascending=False)
+    targets = {b: "long" for b in ranked.index[:TOP_K]}
+    targets.update({b: "short" for b in ranked.index[-TOP_K:]})
+    return targets
+
+
+def _rebalance_live(state: dict, prices: dict[str, float], eff_lev: int) -> None:
+    from app.momentum_rotation_exec import account_equity_usdt, apply_targets, exec_client, sync_positions
+
+    client = exec_client(EXCHANGE_MODE)
+    equity = account_equity_usdt(client)
+    deploy = min(equity, MAX_DEPLOY_USDT) if MAX_DEPLOY_USDT > 0 else equity
+    targets = _target_sides()
+    if targets is None:
+        log_event(state, "모멘텀 데이터 부족 — 이번 리밸런스 건너뜀")
+        return
+    targets = {b: s for b, s in targets.items() if prices.get(b)}
+
+    # gross = deploy * eff_lev, 롱/숏 반반, 포지션당 균등
+    notional_per_pos = deploy * eff_lev / 2 / TOP_K
+    log_event(state, f"[LIVE:{EXCHANGE_MODE}] 리밸런스 시작 — equity {equity:.2f} / 운용 {deploy:.2f} USDT, "
+                     f"배율 {eff_lev}x, 포지션당 명목 {notional_per_pos:.2f} USDT")
+
+    owned = set(state.get("positions", {}))
+    result = apply_targets(client, prices, targets, notional_per_pos, eff_lev,
+                           lambda m: log_event(state, m), owned=owned)
+
+    all_positions = sync_positions(client)
+    managed = set(targets) | owned
+    positions = {b: p for b, p in all_positions.items() if b in managed}
+    state["positions"] = {
+        b: {"side": p["side"], "entry_price": p["entry_price"],
+            "notional_usdt": p["notional"], "unrealized_pnl_usdt": p["unrealized_pnl"]}
+        for b, p in positions.items()
+    }
+    state["last_rebalance_ts"] = now_iso()
+    state["equity_usdt"] = equity
+    log_event(state, f"[LIVE:{EXCHANGE_MODE}] 리밸런스 완료 — 진입 {result['opened']}, 청산 {result['closed']}, "
+                     f"스킵 {result['skipped']}, 오류 {result['errors']} / 실보유 {len(positions)}종목")
+
+
+def _run_cycle_live(state: dict, prices: dict[str, float]) -> None:
+    from app.momentum_rotation_exec import account_equity_usdt, exec_client, flatten_all, sync_positions
+
+    client = exec_client(EXCHANGE_MODE)
+    equity = account_equity_usdt(client)
+
     if state.get("inception_ts") is None:
         state["inception_ts"] = now_iso()
-        log_event(state, f"모멘텀 로테이션 백테스트(페이퍼) 루프 시작 — 가상자본 {START_CAPITAL_USDT:,.0f} USDT, "
-                          f"{len(UNIVERSE)}종목, lookback {LOOKBACK_DAYS}일/리밸런스 {REBALANCE_EVERY_DAYS}일마다/상위·하위 {TOP_K}개")
+        state["hwm_usdt"] = equity
+        state["inception_equity_usdt"] = equity
+        log_event(state, f"[LIVE:{EXCHANGE_MODE}] 실거래 루프 시작 — equity {equity:.2f} USDT, 기준배율 {LEVERAGE}x")
+
+    if RESET_HALT and state.get("halted"):
+        state["halted"] = False
+        state["hwm_usdt"] = equity
+        log_event(state, "[LIVE] halt 수동 해제 — hwm 재설정")
+
+    hwm = max(float(state.get("hwm_usdt") or equity), equity)
+    state["hwm_usdt"] = hwm
+    dd = 1.0 - equity / hwm if hwm > 0 else 0.0
+    state["drawdown"] = dd
+    state["equity_usdt"] = equity
+
+    if state.get("halted"):
+        log_event(state, f"[LIVE] halt 상태 — 거래 중단 중 (dd {dd*100:.1f}%). "
+                         f"해제하려면 MOMENTUM_ROTATION_RESET_HALT=true 로 재기동")
+        return
+
+    owned = set(state.get("positions", {}))
+    all_positions = sync_positions(client)
+    unmanaged = set(all_positions) - owned - set(UNIVERSE)
+    if unmanaged:
+        log_event(state, f"[LIVE] 경고: 이 전략이 모르는 선물 포지션 {sorted(unmanaged)} — "
+                         f"다른 전략과 지갑을 공유 중이면 equity/드로다운 계산이 오염됨. 전용 지갑 권장.")
+
+    if dd >= KILL_DD:
+        log_event(state, f"[LIVE] 킬 스위치 발동 — dd {dd*100:.1f}% >= {KILL_DD*100:.0f}%. 전량 청산 후 정지.")
+        flatten_all(client, lambda m: log_event(state, m), owned=owned)
+        state["halted"] = True
+        state["positions"] = {}
+        return
+
+    eff_lev = 1 if (dd >= DELEVER_DD and LEVERAGE > 1) else LEVERAGE
+    if eff_lev != LEVERAGE:
+        log_event(state, f"[LIVE] 디레버 발동 — dd {dd*100:.1f}% >= {DELEVER_DD*100:.0f}%, 배율 {LEVERAGE}x → {eff_lev}x")
+
+    due = state.get("last_rebalance_ts") is None
+    if not due:
+        last = datetime.fromisoformat(state["last_rebalance_ts"])
+        due = datetime.now(timezone.utc) - last >= timedelta(days=REBALANCE_EVERY_DAYS)
+
+    if due:
+        _rebalance_live(state, prices, eff_lev)
+    else:
+        positions = {b: p for b, p in all_positions.items() if b in owned}
+        state["positions"] = {
+            b: {"side": p["side"], "entry_price": p["entry_price"],
+                "notional_usdt": p["notional"], "unrealized_pnl_usdt": p["unrealized_pnl"]}
+            for b, p in positions.items()
+        }
+        state["unrealized_pnl_usdt"] = sum(p["unrealized_pnl"] for p in positions.values())
+
+
+def run_cycle() -> None:
+    state = load_state()
 
     prices = _fetch_current_prices()
     if not prices:
         log_event(state, "시세 조회 전체 실패 — 이번 사이클 건너뜀")
         save_state(state)
         return
+
+    if LIVE:
+        _run_cycle_live(state, prices)
+        total_pnl = state["equity_usdt"] - float(state.get("inception_equity_usdt") or state["equity_usdt"])
+        state["equity_history"] = (state.get("equity_history", []) + [
+            {"ts": now_iso(), "total_pnl_usdt": total_pnl, "equity_usdt": state["equity_usdt"],
+             "drawdown": state.get("drawdown", 0.0)}
+        ])[-2000:]
+        save_state(state)
+        return
+
+    if state.get("inception_ts") is None:
+        state["inception_ts"] = now_iso()
+        log_event(state, f"모멘텀 로테이션 백테스트(페이퍼) 루프 시작 — 가상자본 {START_CAPITAL_USDT:,.0f} USDT, "
+                          f"{len(UNIVERSE)}종목, lookback {LOOKBACK_DAYS}일/리밸런스 {REBALANCE_EVERY_DAYS}일마다/상위·하위 {TOP_K}개")
 
     due = state.get("last_rebalance_ts") is None
     if not due:

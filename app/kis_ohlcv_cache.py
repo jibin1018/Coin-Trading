@@ -64,10 +64,15 @@ def cached_ohlcv(
 
     need = refresh or cached.empty or not _fresh(cached)
     if need:
+        # 캐시가 있으면 마지막 봉 5일 전부터만 받아 이어붙인다(전체 재조회 방지).
+        fetch_since = since_iso
+        if not cached.empty and not refresh:
+            last = cached.index[-1].date() - dt.timedelta(days=5)
+            fetch_since = max(since_iso[:10], last.isoformat())
         if market == "KR":
-            fetched = fetch_ohlcv_kis(symbol, token, since_iso, until_iso)
+            fetched = fetch_ohlcv_kis(symbol, token, fetch_since, until_iso)
         elif market == "US":
-            fetched = fetch_ohlcv_kis_overseas(symbol, excd, token, since_iso, until_iso)
+            fetched = fetch_ohlcv_kis_overseas(symbol, excd, token, fetch_since, until_iso)
         else:
             raise ValueError(f"알 수 없는 시장: {market!r}")
         if not fetched.empty:

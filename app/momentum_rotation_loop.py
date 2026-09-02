@@ -354,7 +354,9 @@ def run_cycle() -> None:
 
 
 def main() -> None:
-    print(f"모멘텀 로테이션 페이퍼 루프 시작 (사이클 주기 {CHECK_INTERVAL_SECONDS}초)", flush=True)
+    _mode = f"실거래:{EXCHANGE_MODE} {LEVERAGE}x" if LIVE else "페이퍼(백테스트)"
+    print(f"모멘텀 로테이션 루프 시작 [{_mode}] — 룩백 {LOOKBACK_DAYS}일/리밸런스 {REBALANCE_EVERY_DAYS}일/"
+          f"상하위 {TOP_K}개, 사이클 {CHECK_INTERVAL_SECONDS}초", flush=True)
     while True:
         try:
             run_with_timeout(

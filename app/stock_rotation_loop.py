@@ -290,12 +290,14 @@ def _record_equity(token: str, state: dict, snap: dict | None = None) -> None:
     realized = state.get("realized_pnl", 0.0)    # 체결 원장(브로커가 전략별 태깅 불가)
     total = realized + unrealized
     strategy_equity = BUDGET + total             # 배정예산 기준 전략 equity
-    deployed = snap["pos_eval"]                  # API 평가금액 합
+    deployed = snap["pos_eval"]                  # API 평가금액(현재금액) 합
+    entry_value = sum(p["purchase_amt"] for p in snap["positions"].values())  # 매입금액(진입금액) 합
 
     state["broker"] = {
         "queried_ts": snap["queried_ts"],
         "positions": snap["positions"],
         "positions_eval": deployed,
+        "positions_entry": entry_value,
         "positions_unrealized_pnl": unrealized,
         "account_cash_krw": snap["account_cash_krw"],
         "account_total_krw": snap["account_total_krw"],
@@ -303,7 +305,10 @@ def _record_equity(token: str, state: dict, snap: dict | None = None) -> None:
     state["held_symbols"] = sorted(snap["held"])
     state["unrealized_pnl"] = unrealized
     state["equity"] = strategy_equity
+    state["budget"] = BUDGET
+    state["entry_value"] = entry_value
     state["deployed_value"] = deployed
+    state["return_pct"] = (total / BUDGET * 100) if BUDGET > 0 else 0.0
 
     hist = state.setdefault("position_history", {})
     for symbol, p in snap["positions"].items():

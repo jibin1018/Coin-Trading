@@ -306,13 +306,18 @@ def run_cycle() -> None:
 
     if LIVE:
         _run_cycle_live(state, prices)
-        total_pnl = state["equity_usdt"] - float(state.get("inception_equity_usdt") or state["equity_usdt"])
+        inception_equity = float(state.get("inception_equity_usdt") or state["equity_usdt"])
+        total_pnl = state["equity_usdt"] - inception_equity
+        gross_notional = sum(abs(p.get("notional_usdt", 0.0)) for p in state.get("positions", {}).values())
         # 대시보드용 브로커 스냅샷 — equity/positions 는 이미 바이낸스 API(totalMarginBalance,
         # fetch_positions) 값이라 자체 계산 아님. 여기서 한 블록으로 모아둔다.
         state["broker"] = {
             "queried_ts": now_iso(),
             "exchange": EXCHANGE_MODE,
             "equity_usdt": state.get("equity_usdt", 0.0),
+            "inception_equity_usdt": inception_equity,
+            "gross_notional_usdt": gross_notional,
+            "return_pct": (total_pnl / inception_equity * 100) if inception_equity > 0 else 0.0,
             "unrealized_pnl_usdt": state.get("unrealized_pnl_usdt", 0.0),
             "drawdown": state.get("drawdown", 0.0),
             "hwm_usdt": state.get("hwm_usdt", 0.0),

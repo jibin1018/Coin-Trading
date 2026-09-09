@@ -295,8 +295,21 @@ def _run_cycle_live(state: dict, prices: dict[str, float]) -> None:
         state["unrealized_pnl_usdt"] = sum(p["unrealized_pnl"] for p in positions.values())
 
 
+def _stamp_rebalance_schedule(state: dict) -> None:
+    """대시보드 카운트다운용 — 리밸런스 주기와 다음 예정 시각을 상태에 박아둔다.
+    실제 리밸런스는 사이클(CHECK_INTERVAL_SECONDS)마다 due 여부를 재확인하므로,
+    next_rebalance_ts 는 '이 시각 이후 첫 사이클에 리밸런스'라는 하한선이다."""
+    state["rebalance_every_days"] = REBALANCE_EVERY_DAYS
+    last_rb = state.get("last_rebalance_ts")
+    state["next_rebalance_ts"] = (
+        (datetime.fromisoformat(last_rb) + timedelta(days=REBALANCE_EVERY_DAYS)).isoformat()
+        if last_rb else None
+    )
+
+
 def run_cycle() -> None:
     state = load_state()
+    _stamp_rebalance_schedule(state)
 
     prices = _fetch_current_prices()
     if not prices:
@@ -330,6 +343,7 @@ def run_cycle() -> None:
             {"ts": now_iso(), "total_pnl_usdt": total_pnl, "equity_usdt": state["equity_usdt"],
              "drawdown": state.get("drawdown", 0.0)}
         ])[-2000:]
+        _stamp_rebalance_schedule(state)
         save_state(state)
         return
 
@@ -369,6 +383,7 @@ def run_cycle() -> None:
         history.append({"ts": now_iso(), "price": price, "unrealized_pnl_usdt": pos.get("unrealized_pnl_usdt", 0.0)})
         symbol_history[symbol] = history[-2000:]
 
+    _stamp_rebalance_schedule(state)
     save_state(state)
 
 

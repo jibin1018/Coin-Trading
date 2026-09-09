@@ -22,6 +22,8 @@ _DEFAULT_STATE = {
     "unrealized_pnl_usdt": 0.0,
     "inception_ts": None,
     "last_rebalance_ts": None,
+    "next_rebalance_ts": None,  # 대시보드 카운트다운용 — momentum_rotation_loop 이 매 사이클 갱신
+    "rebalance_every_days": None,
     "equity_history": [],
 }
 

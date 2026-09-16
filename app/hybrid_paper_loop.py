@@ -23,7 +23,7 @@ import pandas_ta as ta
 import requests
 
 from app.futures_data import fetch_perp_ohlcv
-from app.momentum_state import now_iso
+from app.momentum_state import append_equity_point, now_iso
 
 # 환경변수 및 설정
 UNIVERSE = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
@@ -239,6 +239,7 @@ def main() -> None:
         )
         total_equity = state["equity_usdt"] + unrealized_pnl
         print(f"--- 🌟 하이브리드 봇 평가자산: {total_equity:,.2f} USDT (보유: {len(state['positions'])}종목) ---")
+        append_equity_point(state, total_equity)
 
         with open(state_file, "w") as f:
             json.dump(state, f, indent=2)

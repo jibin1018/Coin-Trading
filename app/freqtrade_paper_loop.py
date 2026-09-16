@@ -23,7 +23,7 @@ import pandas_ta as ta
 
 from app.crypto_tick_state import load_state as load_tick_state
 from app.futures_data import fetch_perp_ohlcv
-from app.momentum_state import log_event, now_iso
+from app.momentum_state import append_equity_point, log_event, now_iso
 from app.watchdog import run_with_timeout
 
 # 환경변수 및 설정
@@ -153,6 +153,7 @@ def run_cycle() -> None:
             
     current_total_equity = state["equity_usdt"] + unrealized_pnl
     print(f"--- 현재 평가자산: {current_total_equity:,.2f} USDT (보유: {len(state['positions'])}종목) ---")
+    append_equity_point(state, current_total_equity)
 
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)

@@ -20,7 +20,7 @@ except ImportError:
     print("⚠️ yfinance 패키지가 필요합니다. 'pip install yfinance' 를 실행해주세요.")
     raise
 
-from app.momentum_state import now_iso
+from app.momentum_state import append_equity_point, now_iso
 
 KR_STOCK_UNIVERSE = ["005930.KS", "000660.KS", "373220.KS", "035420.KS"] # 삼성전자, SK하이닉스, LG엔솔, 네이버
 START_CAPITAL_KRW = float(os.environ.get("KR_HYBRID_START_CAPITAL", "1000000"))  # 100만원
@@ -121,6 +121,7 @@ def run_cycle() -> None:
 
     total_equity = state["equity_krw"] + unrealized_pnl
     print(f"--- 🇰🇷 한국 주식 봇 평가자산: ₩{total_equity:,.0f} (보유: {len(state['positions'])}) ---")
+    append_equity_point(state, total_equity)
 
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)

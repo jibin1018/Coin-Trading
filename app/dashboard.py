@@ -45,6 +45,17 @@ BOTS_CONFIG = {
     }
 }
 
+# 실제 자금이 걸린 실전투자 봇 — 위 BOTS_CONFIG(전부 페이퍼/모의투자)와 절대 같은 방식으로
+# 다루면 안 된다. 운영 서버(Docker/AI_Ochestration)에서만 가동/중지하고, 이 로컬 대시보드는
+# 상태파일을 읽어 조회만 한다 — Start/Stop 버튼도, running_processes 관리도 일부러 안 붙였다
+# (여기서 실수로 버튼 한 번 눌렀다고 로컬에서 진짜 돈이 움직이는 사고를 막기 위함).
+LIVE_BOTS_CONFIG = {
+    "title": "🔴 실전투자 (Live · 실제 자금)",
+    "bots": {
+        "TRX 스윙 실계좌": {"file": "trx_swing_state.json", "script": "trx_swing_loop"},
+    }
+}
+
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 
 # 각 상태파일의 시작 자본(봇 코드 안의 START_CAPITAL 기본값과 반드시 맞춰줘야 수익률 %가 정확함)
@@ -60,17 +71,28 @@ DEFAULT_INITIAL_CAPITAL = 70.0  # ≈10만원, 나머지 신규 페이퍼봇 공
 # 현재 실행 중인 서브프로세스를 추적하기 위한 딕셔너리
 running_processes = {}
 
+def _extract_history_equity(point: dict, initial_capital: float) -> float | None:
+    """봇마다 이력 기록 스키마가 조금씩 달라서(equity_usdt/equity_krw/total_pnl_usdt...) 하나로 정규화."""
+    for key in ("equity", "equity_usdt", "equity_usd", "equity_krw"):
+        if key in point:
+            return point[key]
+    for key in ("total_pnl_usdt", "total_pnl_krw"):
+        if key in point:
+            return initial_capital + point[key]
+    return None
+
+
 def get_bot_status(filename: str, script_name: str) -> dict:
     filepath = os.path.join(ROOT_DIR, filename)
     is_running = script_name in running_processes and running_processes[script_name].poll() is None
-    
+
     if not os.path.exists(filepath):
-        return {"status": "online" if is_running else "offline", "equity": 0, "pnl": 0, "positions": {}}
-    
+        return {"status": "online" if is_running else "offline", "equity": 0, "pnl": 0, "positions": {}, "history": []}
+
     try:
         with open(filepath, "r") as f:
             data = json.load(f)
-        
+
         initial_capital = INITIAL_CAPITAL_BY_FILE.get(filename, DEFAULT_INITIAL_CAPITAL)
 
 
@@ -85,15 +107,61 @@ def get_bot_status(filename: str, script_name: str) -> dict:
         )
         total_equity = equity + position_value
         pnl_pct = ((total_equity / initial_capital) - 1) * 100
-        
+
+        history = []
+        for point in data.get("equity_history", []):
+            point_equity = _extract_history_equity(point, initial_capital)
+            ts = point.get("ts")
+            if point_equity is None or not ts:
+                continue
+            history.append({"ts": ts, "value": round(((point_equity / initial_capital) - 1) * 100, 3)})
+
         return {
             "status": "online" if is_running else "offline (데이터만 존재)",
             "equity": total_equity,
             "pnl": pnl_pct,
-            "positions": data.get("positions", {})
+            "positions": data.get("positions", {}),
+            "history": history,
         }
     except Exception as e:
-        return {"status": "error", "equity": 0, "pnl": 0, "positions": {}}
+        return {"status": "error", "equity": 0, "pnl": 0, "positions": {}, "history": []}
+
+
+def get_live_bot_status(filename: str) -> dict:
+    """실전투자 봇은 고정 시작자본 개념이 없다(계좌 잔고를 그때그때 실시간 조회) — 그래서
+    수익률(%) 대신 누적 손익(USDT) 절대값으로 보여준다. 상태파일은 운영 서버(Docker)가
+    쓰는 것이라 로컬에 없을 수도 있다 — 그 경우 '연결 안 됨'으로 표시한다."""
+    filepath = os.path.join(ROOT_DIR, filename)
+    if not os.path.exists(filepath):
+        return {"connected": False, "total_pnl_usdt": 0.0, "positions": {}, "history": [], "halted": False, "drawdown": 0.0}
+
+    try:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+
+        history = [
+            {"ts": p["ts"], "value": p.get("total_pnl_usdt", 0.0)}
+            for p in data.get("equity_history", []) if p.get("ts")
+        ]
+        total_pnl = history[-1]["value"] if history else data.get("cumulative_realized_pnl_usdt", 0.0)
+
+        positions = {}
+        position = data.get("position")
+        if position:
+            pos_hist = data.get("position_history", {}).get("TRX", [])
+            last_unrealized = pos_hist[-1]["unrealized_pnl_usdt"] if pos_hist else 0.0
+            positions["TRX"] = {**position, "side": "long", "unrealized_pnl_usdt": last_unrealized}
+
+        return {
+            "connected": True,
+            "total_pnl_usdt": total_pnl,
+            "positions": positions,
+            "history": history,
+            "halted": bool(data.get("halted", False)),
+            "drawdown": data.get("drawdown", 0.0),
+        }
+    except Exception:
+        return {"connected": False, "total_pnl_usdt": 0.0, "positions": {}, "history": [], "halted": False, "drawdown": 0.0}
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -157,15 +225,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         for cat_id, cat_info in BOTS_CONFIG.items():
             for bot_name, bot_info in cat_info["bots"].items():
                 results[cat_id][bot_name] = get_bot_status(bot_info["file"], bot_info["script"])
-            
-        html = self.generate_html(results)
+
+        live_results = {
+            bot_name: get_live_bot_status(bot_info["file"])
+            for bot_name, bot_info in LIVE_BOTS_CONFIG["bots"].items()
+        }
+
+        html = self.generate_html(results, live_results)
         self.wfile.write(html.encode('utf-8'))
 
-    def generate_html(self, results: dict) -> str:
+    def generate_html(self, results: dict, live_results: dict) -> str:
         tabs_nav_html = ""
         tabs_content_html = ""
         scripts_html = ""
-        
+        hist_data_all = {}
+
         for idx, (cat_id, cat_info) in enumerate(BOTS_CONFIG.items()):
             title = cat_info["title"]
             is_active = "true" if idx == 0 else "false"
@@ -174,7 +248,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             
             # 탭 네비게이션
             tabs_nav_html += f"""
-                <button class="tab-btn w-1/3 py-4 text-center border-b-2 font-medium text-sm sm:text-base {active_class} transition-colors" data-target="tab-{cat_id}">
+                <button class="tab-btn flex-1 py-4 text-center border-b-2 font-medium text-sm sm:text-base {active_class} transition-colors" data-target="tab-{cat_id}">
                     {title}
                 </button>
             """
@@ -226,9 +300,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 
                 currency_symbol = "₩" if "KR" in cat_id else "$"
                 equity_fmt = f"{data['equity']:,.0f}" if "KR" in cat_id else f"{data['equity']:,.2f}"
-                
+
+                hist_id = f"h{len(hist_data_all)}"
+                hist_data_all[hist_id] = {"label": name, "history": data["history"], "unit": "pct"}
+
                 cards_html += f"""
-                <div class="bg-gray-800/40 backdrop-blur-md rounded-xl border {border_cls} p-6 shadow-2xl transition-all hover:bg-gray-800/60">
+                <div onclick="openHistory('{hist_id}')" class="cursor-pointer bg-gray-800/40 backdrop-blur-md rounded-xl border {border_cls} p-6 shadow-2xl transition-all hover:bg-gray-800/60 hover:ring-1 hover:ring-emerald-500/50">
                     <div class="flex justify-between items-start mb-4">
                         <h3 class="text-lg font-bold text-gray-100">{name}</h3>
                         {status_badge}
@@ -308,6 +385,88 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 }});
             """
 
+        # 실전투자(Live) 탭 — 페이퍼봇 탭들과 별도 루프. Start/Stop 버튼도, ROI% 비교차트도 없다
+        # (고정 시작자본이 없어 %가 의미 없고, 여기서 실수로 실제 매매를 켜는 사고를 막기 위함).
+        live_cards_html = ""
+        for bot_name, bot_info in LIVE_BOTS_CONFIG["bots"].items():
+            d = live_results[bot_name]
+
+            if not d["connected"]:
+                status_badge = '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400">연결 안 됨</span>'
+                border_cls = "border-gray-700"
+            elif d["halted"]:
+                status_badge = '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-900 text-rose-300">🛑 킬스위치 정지</span>'
+                border_cls = "border-rose-500/50"
+            else:
+                status_badge = '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-900 text-red-300"><span class="w-2 h-2 mr-1.5 bg-red-400 rounded-full animate-pulse"></span>실계좌 가동중</span>'
+                border_cls = "border-red-500/30"
+
+            pnl = d["total_pnl_usdt"]
+            pnl_cls = "text-emerald-400" if pnl >= 0 else "text-rose-400"
+            pnl_sign = "+" if pnl > 0 else ""
+
+            if d["positions"]:
+                pos = d["positions"]["TRX"]
+                upnl = pos.get("unrealized_pnl_usdt", 0.0)
+                upnl_color = "text-emerald-400" if upnl >= 0 else "text-rose-400"
+                live_pos_html = f"""
+                <div class="flex justify-between items-center py-2">
+                    <div>
+                        <span class="font-bold text-gray-200">TRX</span>
+                        <span class="text-xs ml-2 font-mono text-gray-500">{pos.get('qty', 0):.2f}개 @ {pos.get('entry_price', 0):.5f}</span>
+                    </div>
+                    <div class="font-mono text-sm {upnl_color}">{upnl:+.2f} $</div>
+                </div>
+                """
+            elif d["connected"]:
+                live_pos_html = '<div class="text-gray-500 text-sm py-2 italic text-center">관망 중 (포지션 없음)</div>'
+            else:
+                live_pos_html = '<div class="text-gray-500 text-sm py-2 italic text-center">운영 서버 상태파일을 로컬에서 찾을 수 없음</div>'
+
+            hist_id = f"h{len(hist_data_all)}"
+            hist_data_all[hist_id] = {"label": bot_name, "history": d["history"], "unit": "usdt"}
+
+            live_cards_html += f"""
+            <div onclick="openHistory('{hist_id}')" class="cursor-pointer bg-gray-800/40 backdrop-blur-md rounded-xl border {border_cls} p-6 shadow-2xl transition-all hover:bg-gray-800/60 hover:ring-1 hover:ring-red-500/50">
+                <div class="flex justify-between items-start mb-4">
+                    <h3 class="text-lg font-bold text-gray-100">{bot_name}</h3>
+                    {status_badge}
+                </div>
+                <div class="mb-6">
+                    <div class="text-sm text-gray-400 mb-1">누적 손익 (실현+평가)</div>
+                    <div class="text-2xl font-mono font-bold {pnl_cls}">{pnl_sign}{pnl:,.2f} USDT</div>
+                    <div class="text-sm font-mono mt-1 text-gray-500">드로다운 {d['drawdown']*100:.1f}%</div>
+                </div>
+                <div class="bg-gray-900/50 rounded-lg p-4 border border-gray-700/50">
+                    <div class="text-xs uppercase text-gray-500 font-bold mb-2 tracking-wider">Position</div>
+                    {live_pos_html}
+                </div>
+            </div>
+            """
+
+        tabs_nav_html += f"""
+            <button class="tab-btn flex-1 py-4 text-center border-b-2 font-medium text-sm sm:text-base border-transparent text-red-400/70 hover:text-red-300 hover:border-red-300 transition-colors" data-target="tab-Live">
+                {LIVE_BOTS_CONFIG['title']}
+            </button>
+        """
+
+        tabs_content_html += f"""
+        <div id="tab-Live" class="tab-content hidden animate-fade-in">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-2xl font-extrabold text-white">{LIVE_BOTS_CONFIG['title']}</h2>
+            </div>
+            <div class="bg-red-950/40 border border-red-500/40 rounded-xl p-4 mb-8 text-sm text-red-200">
+                ⚠️ 이 탭의 봇은 <b>실제 계좌 자금</b>으로 매매합니다. 가동/중지는 이 로컬 대시보드가 아니라
+                운영 서버(Docker · AI_Ochestration)에서만 합니다 — 여기서는 상태파일을 읽어 조회만 합니다.
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                {live_cards_html}
+            </div>
+        </div>
+        """
+
+        hist_json = json.dumps(hist_data_all, ensure_ascii=False)
+
         return f"""
         <!DOCTYPE html>
         <html lang="ko" class="dark">
@@ -348,7 +507,79 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 </div>
             </div>
 
+            <!-- 전략 클릭 시 시간순 수익률 변화를 보여주는 모달 -->
+            <div id="historyModal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onclick="if(event.target === this) closeHistory()">
+                <div class="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-3xl p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 id="historyModalTitle" class="text-lg font-bold text-gray-100">전략 수익률 변화</h3>
+                        <button onclick="closeHistory()" class="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+                    </div>
+                    <div id="historyEmptyMsg" class="hidden text-gray-500 text-sm italic text-center py-12">
+                        아직 쌓인 이력이 없습니다 — 사이클이 몇 번 더 돌면(봇마다 5분~4시간 간격) 그래프가 채워집니다.
+                    </div>
+                    <div class="h-72 w-full">
+                        <canvas id="historyChartCanvas"></canvas>
+                    </div>
+                </div>
+            </div>
+
             <script>
+                const HIST_DATA = {hist_json};
+                let historyChart = null;
+
+                function openHistory(id) {{
+                    const d = HIST_DATA[id];
+                    if (!d) return;
+                    document.getElementById('historyModalTitle').textContent = d.label + ' — 수익률 변화';
+                    const emptyMsg = document.getElementById('historyEmptyMsg');
+                    const canvas = document.getElementById('historyChartCanvas');
+
+                    if (historyChart) {{ historyChart.destroy(); historyChart = null; }}
+
+                    if (!d.history || d.history.length < 2) {{
+                        emptyMsg.classList.remove('hidden');
+                        canvas.classList.add('hidden');
+                    }} else {{
+                        emptyMsg.classList.add('hidden');
+                        canvas.classList.remove('hidden');
+                        const isUsdt = d.unit === 'usdt';
+                        const labels = d.history.map(p => new Date(p.ts).toLocaleString('ko-KR', {{month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'}}));
+                        const values = d.history.map(p => p.value);
+                        const lineColor = values[values.length - 1] >= 0 ? '#34d399' : '#f87171';
+                        historyChart = new Chart(canvas.getContext('2d'), {{
+                            type: 'line',
+                            data: {{
+                                labels: labels,
+                                datasets: [{{
+                                    label: isUsdt ? '누적 손익 (USDT)' : '수익률 (%)',
+                                    data: values,
+                                    borderColor: lineColor,
+                                    backgroundColor: lineColor + '26',
+                                    fill: true,
+                                    tension: 0.25,
+                                    pointRadius: 0,
+                                    borderWidth: 2
+                                }}]
+                            }},
+                            options: {{
+                                responsive: true,
+                                maintainAspectRatio: false,
+                                animation: false,
+                                plugins: {{ legend: {{ display: false }} }},
+                                scales: {{
+                                    y: {{ grid: {{ color: 'rgba(51, 65, 85, 0.5)', drawBorder: false }}, ticks: {{ color: '#94a3b8', callback: (v) => isUsdt ? ('$' + v) : (v + '%') }} }},
+                                    x: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }} }}
+                                }}
+                            }}
+                        }});
+                    }}
+
+                    document.getElementById('historyModal').classList.remove('hidden');
+                }}
+
+                function closeHistory() {{
+                    document.getElementById('historyModal').classList.add('hidden');
+                }}
                 // URL 해시값에 따라 탭 상태 복구 (새로고침 시 유지)
                 document.addEventListener('DOMContentLoaded', () => {{
                     let activeTab = window.location.hash.substring(1) || 'tab-Crypto';

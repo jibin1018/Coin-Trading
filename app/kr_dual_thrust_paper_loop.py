@@ -60,6 +60,7 @@ _DEFAULT_STATE: dict = {
     "halted": False,
     "stop_loss_events": [],
     "inception_ts": None,
+    "equity_history": [],
 }
 
 
@@ -219,7 +220,15 @@ def run_cycle() -> None:
                 state["equity_krw"] = state.get("equity_krw", 0.0) - qty * price
                 log_event(state, f"[{name}] 상단선({b['buy_line']:,.0f}) 돌파 매수 — {qty}주 @ {price:,.0f}")
 
-    log_event(state, f"평가자산 {equity:,.0f}원 (보유 {len(positions)}종목, 드로다운 {guard['dd']*100:.1f}%)")
+    # 이 사이클에서 체결된 매수/매도를 반영한 최종 평가자산 (위 equity는 사이클 시작 시점 값)
+    final_equity = state.get("equity_krw", CAPITAL_BUDGET_KRW) + sum(
+        p["qty"] * prices.get(s, p["entry_price"]) for s, p in positions.items()
+    )
+    state["equity_history"] = (state.get("equity_history", []) + [
+        {"ts": now_iso(), "equity": final_equity}
+    ])[-1000:]
+
+    log_event(state, f"평가자산 {final_equity:,.0f}원 (보유 {len(positions)}종목, 드로다운 {guard['dd']*100:.1f}%)")
     save_state(state)
 
 

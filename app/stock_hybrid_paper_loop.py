@@ -23,7 +23,7 @@ except ImportError:
     print("⚠️ yfinance 패키지가 필요합니다. 'pip install yfinance' 를 실행해주세요.")
     raise
 
-from app.momentum_state import now_iso
+from app.momentum_state import append_equity_point, now_iso
 
 STOCK_UNIVERSE = ["TSLA", "NVDA", "AAPL", "MSFT"]
 START_CAPITAL_USD = float(os.environ.get("STOCK_HYBRID_START_CAPITAL", "700"))  # ≈100만원
@@ -141,6 +141,7 @@ def run_cycle() -> None:
 
     total_equity = state["equity_usd"] + unrealized_pnl
     print(f"--- 🇺🇸 주식 하이브리드 봇 평가자산: ${total_equity:,.2f} (보유: {len(state['positions'])}) ---")
+    append_equity_point(state, total_equity)
 
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)

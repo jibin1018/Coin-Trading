@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 import ccxt
 import requests
 
-from app.momentum_state import log_event, now_iso
+from app.momentum_state import append_equity_point, log_event, now_iso
 
 # 환경변수 및 설정
 UNIVERSE = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
@@ -191,6 +191,7 @@ def run_cycle() -> None:
             
     current_total_equity = state["equity_usdt"] + unrealized_pnl
     print(f"--- AI 봇 현재 평가자산: {current_total_equity:,.2f} USDT (보유: {len(state['positions'])}종목) ---")
+    append_equity_point(state, current_total_equity)
 
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)

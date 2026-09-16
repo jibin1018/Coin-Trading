@@ -53,3 +53,11 @@ def log_event(state: dict, message: str) -> None:
     state.setdefault("trade_log", []).append(entry)
     state["trade_log"] = state["trade_log"][-2000:]
     print(f"[{entry['ts']}] {message}", flush=True)
+
+
+def append_equity_point(state: dict, equity: float, cap: int = 1000) -> None:
+    """사이클마다 총자산 스냅샷을 남긴다 — 대시보드가 전략 카드를 클릭하면
+    이 이력으로 시간에 따른 수익률 변화 차트를 그린다."""
+    state["equity_history"] = (state.get("equity_history", []) + [
+        {"ts": now_iso(), "equity": equity}
+    ])[-cap:]

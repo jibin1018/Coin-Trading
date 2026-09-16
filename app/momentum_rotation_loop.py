@@ -369,7 +369,7 @@ def run_cycle() -> None:
 
     total_pnl = state["equity_usdt"] - START_CAPITAL_USDT
     state["equity_history"] = (state.get("equity_history", []) + [
-        {"ts": now_iso(), "total_pnl_usdt": total_pnl}
+        {"ts": now_iso(), "total_pnl_usdt": total_pnl, "equity_usdt": state["equity_usdt"]}
     ])[-2000:]
 
     # 종목별 차트용 — 이미 조회한 가격을 그대로 기록만 한다(추가 API 호출 없음). 지금 보유중인

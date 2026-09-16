@@ -16,7 +16,7 @@ import pandas as pd
 import pandas_ta as ta
 
 from app.futures_data import fetch_perp_ohlcv
-from app.momentum_state import now_iso
+from app.momentum_state import append_equity_point, now_iso
 
 # scikit-learn이 없을 경우를 대비한 처리
 try:
@@ -132,10 +132,25 @@ def run_cycle() -> None:
                 state["positions"][base] = {"side": decision, "entry_price": current_price, "notional_usdt": invest_amount}
                 state["equity_usdt"] -= invest_amount
 
+    # 미실현 손익 업데이트 — 이 봇은 지금까지 보유 포지션의 평가손익을 한 번도 계산하지 않았음
+    unrealized_pnl = 0.0
+    for base, pos in state["positions"].items():
+        try:
+            price = float(exchange.fetch_ticker(_perp_symbol(base))["last"])
+        except Exception:
+            continue
+        direction = 1 if pos["side"] == "long" else -1
+        pnl = pos["notional_usdt"] * direction * (price / pos["entry_price"] - 1)
+        pos["unrealized_pnl_usdt"] = pnl
+        unrealized_pnl += pnl
+
+    total_equity = state["equity_usdt"] + unrealized_pnl
+    append_equity_point(state, total_equity)
+
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)
-        
-    print(f"--- 🧠 ML 봇 평가자산: {state['equity_usdt']:,.2f} USDT (보유: {len(state['positions'])}) ---")
+
+    print(f"--- 🧠 ML 봇 평가자산: {total_equity:,.2f} USDT (보유: {len(state['positions'])}) ---")
 
 def main() -> None:
     if not HAS_SKLEARN:

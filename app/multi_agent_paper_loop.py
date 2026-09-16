@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 import ccxt
 import requests
 
-from app.momentum_state import now_iso
+from app.momentum_state import append_equity_point, now_iso
 
 START_CAPITAL_USDT = float(os.environ.get("AGENTS_START_CAPITAL_USDT", "70"))  # ≈10만원
 CHECK_INTERVAL_SECONDS = 60 * 60 * 4 # 4시간마다 회의
@@ -123,6 +123,18 @@ def run_cycle() -> None:
             print(f"🟢 위원회 결정으로 진입: {TARGET_COIN} {decision} @ {current_price:.2f}")
             state["positions"][TARGET_COIN] = {"side": decision, "entry_price": current_price, "notional_usdt": invest_amount}
             state["equity_usdt"] -= invest_amount
+
+    # 평가금 업데이트 (이 봇은 지금까지 종료 시점에 총자산을 아예 계산하지 않았음)
+    unrealized_pnl = 0.0
+    pos = state["positions"].get(TARGET_COIN)
+    if pos:
+        direction = 1 if pos["side"] == "long" else -1
+        unrealized_pnl = pos["notional_usdt"] * direction * (current_price / pos["entry_price"] - 1)
+        pos["unrealized_pnl_usdt"] = unrealized_pnl
+
+    total_equity = state["equity_usdt"] + unrealized_pnl
+    print(f"--- 🧑‍⚖️ 다중 에이전트 봇 평가자산: {total_equity:,.2f} USDT (보유: {len(state['positions'])}) ---")
+    append_equity_point(state, total_equity)
 
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)

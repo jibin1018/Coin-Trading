@@ -15,7 +15,7 @@ import ccxt
 import pandas as pd
 
 from app.futures_data import fetch_perp_ohlcv
-from app.momentum_state import now_iso
+from app.momentum_state import append_equity_point, now_iso
 
 UNIVERSE = ["BTC", "ETH", "SOL"]
 START_CAPITAL_USDT = float(os.environ.get("DUAL_THRUST_START_CAPITAL_USDT", "70"))  # ≈10만원
@@ -124,6 +124,7 @@ def run_cycle() -> None:
 
     total_equity = state["equity_usdt"] + unrealized_pnl
     print(f"--- 🚀 Dual Thrust 평가자산: {total_equity:,.2f} USDT (보유: {len(state['positions'])}종목) ---")
+    append_equity_point(state, total_equity)
 
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)

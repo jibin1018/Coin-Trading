@@ -249,7 +249,9 @@ def run_cycle(token: str) -> None:
         hist = state.setdefault("position_history", {}).setdefault(symbol, [])
         hist.append({"ts": now_iso(), "price": price, "unrealized_pnl_krw": unrealized})
         state["position_history"][symbol] = hist[-20000:]
-    state["equity_history"] = (state.get("equity_history", []) + [{"ts": now_iso(), "total_pnl_krw": total_pnl}])[-20000:]
+    state["equity_history"] = (state.get("equity_history", []) + [
+        {"ts": now_iso(), "total_pnl_krw": total_pnl, "equity": CAPITAL_BUDGET_KRW + total_pnl}
+    ])[-20000:]
 
     log_event(state, f"평가자산 {equity:,.0f}원 (보유 {len(positions)}종목, 드로다운 {guard['dd']*100:.1f}%)")
     save_state(state)

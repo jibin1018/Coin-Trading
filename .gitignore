@@ -15,3 +15,9 @@ venv/
 
 # 정리 중인 내부 감사 문서 — 다듬어지면 gitignore 해제 후 커밋 예정
 docs/app-파일-인벤토리.md
+
+# 로그 파일
+*.log
+
+# 로컬 대시보드(app/dashboard.py)가 루트에 쓰는 페이퍼봇 상태파일 — 개인 트레이딩 데이터라 커밋 안 함
+/*_state.json

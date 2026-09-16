@@ -14,6 +14,7 @@ import os
 from app.data import fetch_ohlcv
 from app.more_indicators import add_ema_cross_indicators
 from app.paper_exchange import spot_client
+from app.portfolio_guard import check_drawdown_kill, check_stop_loss_cooldown, record_stop_loss
 from app.trx_swing_state import load_state, log_event, now_iso, save_state
 
 SYMBOL = "TRX/USDT"
@@ -21,6 +22,15 @@ STOP_LOSS_PCT = float(os.environ.get("TRX_SWING_STOP_LOSS_PCT", "12.0"))
 BALANCE_FRACTION = float(os.environ.get("TRX_SWING_BALANCE_FRACTION", "0.95"))
 MIN_NOTIONAL_USDT = float(os.environ.get("TRX_SWING_MIN_NOTIONAL_USDT", "10.0"))
 SPOT_FEE_PCT = 0.1
+
+# 포트폴리오 킬스위치 — 백테스트 MDD(51%)보다 한참 낮은 지점에서 먼저 멈추도록 기본값을 보수적으로 잡음.
+# equity 는 이 봇이 만지는 USDT+TRX 잔고 기준이라, 펀딩비 차익거래 봇과 실계좌를 공유하는 동안은
+# 그쪽 활동이 드로다운 계산에 섞일 수 있음(전용 지갑 분리 전까지는 감안해서 볼 것).
+KILL_DD = float(os.environ.get("TRX_SWING_KILL_DD", "0.25"))
+RESET_HALT = os.environ.get("TRX_SWING_RESET_HALT", "false").lower() == "true"
+# 손절이 짧은 기간 반복되면(횡보장 휩쏘) 드로다운이 커지기 전에 먼저 재진입을 잠시 막는다.
+STOP_COOLDOWN_DAYS = float(os.environ.get("TRX_SWING_STOP_COOLDOWN_DAYS", "7"))
+STOP_COOLDOWN_MAX = int(os.environ.get("TRX_SWING_STOP_COOLDOWN_MAX", "2"))
 
 
 def _fill_price(order: dict, fallback: float) -> float:
@@ -71,7 +81,53 @@ def run_cycle() -> None:
         save_state(state)
         return
 
+    try:
+        balance = spot.fetch_balance()
+        available_usdt = float((balance.get("USDT") or {}).get("free", 0.0) or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        log_event(state, f"잔고조회 실패 ({exc}) — 이번 사이클 건너뜀")
+        save_state(state)
+        return
+
     position = state.get("position")
+    equity = available_usdt + (position["qty"] * current_price if position else 0.0)
+
+    if RESET_HALT and state.get("halted"):
+        state["halted"] = False
+        state["hwm_usdt"] = equity
+        log_event(state, "halt 수동 해제 — hwm 재설정")
+
+    guard = check_drawdown_kill(state, equity, KILL_DD)
+
+    if state.get("halted"):
+        log_event(
+            state,
+            f"halt 상태 — 거래 중단 중 (dd {guard['dd']*100:.1f}%). "
+            f"해제하려면 TRX_SWING_RESET_HALT=true 로 재기동",
+        )
+        save_state(state)
+        return
+
+    if guard["kill"]:
+        log_event(state, f"킬 스위치 발동 — dd {guard['dd']*100:.1f}% >= {KILL_DD*100:.0f}%. 전량 청산 후 정지.")
+        if position is not None:
+            try:
+                order = spot.create_market_sell_order(SYMBOL, position["qty"])
+            except Exception as exc:  # noqa: BLE001
+                log_event(state, f"킬스위치 청산 실패 ({exc}) — 다음 사이클에 재시도")
+                save_state(state)
+                return
+            exit_price = _fill_price(order, current_price)
+            proceeds = position["qty"] * exit_price
+            exit_fee_usdt = proceeds * SPOT_FEE_PCT / 100
+            state["cumulative_fee_usdt"] = state.get("cumulative_fee_usdt", 0.0) + exit_fee_usdt
+            net_pnl = proceeds - position["notional_usdt"] - exit_fee_usdt
+            state["cumulative_realized_pnl_usdt"] = state.get("cumulative_realized_pnl_usdt", 0.0) + net_pnl
+            log_event(state, f"킬스위치 전량청산 — 순손익 {net_pnl:+.2f} USDT")
+            state["position"] = None
+        state["halted"] = True
+        save_state(state)
+        return
 
     if position is not None:
         stop_price = position["entry_price"] * (1 - STOP_LOSS_PCT / 100)
@@ -94,6 +150,7 @@ def run_cycle() -> None:
                 f"(손절선 {stop_price:.5f}), 순손익 {net_pnl:+.2f} USDT",
             )
             state["position"] = None
+            record_stop_loss(state)
         else:
             unrealized = (current_price - position["entry_price"]) * position["qty"]
             log_event(
@@ -109,15 +166,13 @@ def run_cycle() -> None:
             save_state(state)
             return
 
-        if golden_cross:
-            try:
-                balance = spot.fetch_balance()
-                available_usdt = float((balance.get("USDT") or {}).get("free", 0.0) or 0.0)
-            except Exception as exc:  # noqa: BLE001
-                log_event(state, f"잔고조회 실패 ({exc}) — 이번 사이클 건너뜀")
-                save_state(state)
-                return
-
+        if golden_cross and check_stop_loss_cooldown(state, STOP_COOLDOWN_DAYS, STOP_COOLDOWN_MAX):
+            log_event(
+                state,
+                f"골든크로스 발생했으나 최근 {STOP_COOLDOWN_DAYS:.0f}일 내 손절 {STOP_COOLDOWN_MAX}회 이상 — "
+                f"휩쏘 의심, 재진입 보류",
+            )
+        elif golden_cross:
             notional_usdt = available_usdt * BALANCE_FRACTION
             if notional_usdt < MIN_NOTIONAL_USDT:
                 log_event(state, f"골든크로스 발생했으나 가용잔고 부족({available_usdt:.2f} USDT) — 진입 건너뜀")

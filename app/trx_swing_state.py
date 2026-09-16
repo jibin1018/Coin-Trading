@@ -21,6 +21,10 @@ _DEFAULT_STATE = {
     "cumulative_fee_usdt": 0.0,
     "inception_ts": None,
     "equity_history": [],
+    "hwm_usdt": None,       # 고점 추적 — 킬스위치 판정용 (app/portfolio_guard.py)
+    "drawdown": 0.0,
+    "halted": False,
+    "stop_loss_events": [],  # 최근 손절 발생 타임스탬프 — 반복 손절(휩쏘) 감지용
 }
 
 

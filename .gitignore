@@ -8,3 +8,10 @@ venv/
 
 # Claude Code worktrees/런타임
 .claude/
+
+# 로컬 시크릿 (.env.example만 커밋, 실값은 절대 커밋하지 않음)
+.env
+.env.local
+
+# 정리 중인 내부 감사 문서 — 다듬어지면 gitignore 해제 후 커밋 예정
+docs/app-파일-인벤토리.md

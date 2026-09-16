@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import urllib.parse
@@ -60,7 +61,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 
 # 각 상태파일의 시작 자본(봇 코드 안의 START_CAPITAL 기본값과 반드시 맞춰줘야 수익률 %가 정확함)
 INITIAL_CAPITAL_BY_FILE = {
-    "momentum_state.json": 10000.0,  # 기존부터 운영해온 값, 안 건드림
+    "momentum_state.json": 70.0,  # ≈10만원, 다른 페이퍼봇들과 동일 기준으로 통일
     "kr_hybrid_state.json": 1000000.0,  # 100만원
     "stock_hybrid_state.json": 700.0,  # ≈100만원
     "kr_dual_thrust_state.json": 1000000.0,  # 100만원 (KIS 실연동, app/kr_dual_thrust_kis_loop.py 예산과 맞춤)
@@ -68,8 +69,92 @@ INITIAL_CAPITAL_BY_FILE = {
 }
 DEFAULT_INITIAL_CAPITAL = 70.0  # ≈10만원, 나머지 신규 페이퍼봇 공통
 
-# 현재 실행 중인 서브프로세스를 추적하기 위한 딕셔너리
+# 신규 페이퍼봇 9개는 진입 시 equity에서 원금을 차감하는 방식(equity=가용현금)이라 대시보드가
+# 포지션 가치를 더해줘야 하는데, momentum_rotation_loop.py(기존 원본 봇)는 리밸런스마다
+# equity_usdt 자체를 총자산(NAV)으로 다시 계산해서 넣는다 — 포지션 notional이 이미 그 안에
+# 포함돼있어서, 여기에 포지션 가치를 또 더하면 2배로 뻥튀기된다(실측: $19,992 = $9,996 × 2).
+EQUITY_ALREADY_INCLUDES_POSITIONS = {"momentum_state.json"}
+
+# script_name -> bot_info({file, script}) 역참조. 개별 봇 시작/정지 API에서 파일명을 찾는 데 쓴다.
+ALL_BOTS_BY_SCRIPT = {
+    bot_info["script"]: bot_info
+    for cat_info in BOTS_CONFIG.values()
+    for bot_info in cat_info["bots"].values()
+}
+
+# 이 두 봇은 Docker 배포 기준으로 상태파일 기본 경로가 /app/data/... 로 박혀있다(운영 서버
+# 전용 절대경로) — 로컬에서 그대로 띄우면 macOS 루트가 read-only라 매 사이클 저장에서
+# 크래시난다. 로컬 서브프로세스로 띄울 때만 대시보드가 읽는 파일 경로로 덮어써준다.
+STATE_PATH_ENV_BY_SCRIPT = {
+    "momentum_rotation_loop": "MOMENTUM_ROTATION_STATE_PATH",
+    "kr_dual_thrust_kis_loop": "KR_DUAL_THRUST_STATE_PATH",
+}
+
+# 현재 실행 중인 서브프로세스를 추적하기 위한 딕셔너리 — 대시보드 프로세스 자체를 재시작하면
+# 이 딕셔너리는 비워지지만, 대시보드가 예전에 띄워둔 봇 프로세스는 OS에는 여전히 살아있다.
+# 그래서 아래 함수들은 이 딕셔너리만 믿지 않고 pgrep으로 실제 OS 프로세스 존재 여부도 같이 본다.
 running_processes = {}
+
+
+def _is_script_running(script_name: str) -> bool:
+    p = running_processes.get(script_name)
+    if p is not None and p.poll() is None:
+        return True
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"app\\.{script_name}$"],
+            capture_output=True, text=True, timeout=3,
+        )
+        return bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
+def _spawn_bot(script_name: str, filename: str) -> bool:
+    """이미 돌고 있으면(이 대시보드가 띄웠든, 이전 대시보드가 띄운 채 남아있든) False, 새로 띄웠으면 True."""
+    if _is_script_running(script_name):
+        return False
+
+    env = os.environ.copy()
+    state_env_var = STATE_PATH_ENV_BY_SCRIPT.get(script_name)
+    if state_env_var:
+        env[state_env_var] = os.path.join(ROOT_DIR, filename)
+
+    # sys.executable: 대시보드를 띄운 것과 같은 파이썬(venv 등)을 그대로 재사용
+    # -u: stdout이 파일로 리다이렉트되면 기본이 블록버퍼링이라 print가 즉시 안 보임 — 강제로 언버퍼링
+    log_file = open(os.path.join(ROOT_DIR, f"{script_name}.log"), "a")
+    p = subprocess.Popen(
+        [sys.executable, "-u", "-m", f"app.{script_name}"],
+        cwd=ROOT_DIR,
+        stdout=log_file,
+        stderr=log_file,
+        env=env,
+    )
+    running_processes[script_name] = p
+    print(f"[Dashboard] Started {script_name} (PID: {p.pid})")
+    return True
+
+
+def _stop_bot(script_name: str) -> bool:
+    p = running_processes.get(script_name)
+    if p is not None and p.poll() is None:
+        p.terminate()
+        print(f"[Dashboard] Stopped {script_name} (PID: {p.pid})")
+        return True
+
+    # 이 대시보드 인스턴스가 띄운 게 아닌(재시작 전 대시보드가 띄워둔) 고아 프로세스 — pgrep으로 찾아서 직접 정지
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"app\\.{script_name}$"],
+            capture_output=True, text=True, timeout=3,
+        )
+        pids = [int(pid) for pid in result.stdout.split()]
+        for pid in pids:
+            os.kill(pid, signal.SIGTERM)
+            print(f"[Dashboard] Stopped orphaned {script_name} (PID: {pid})")
+        return bool(pids)
+    except Exception:
+        return False
 
 def _extract_history_equity(point: dict, initial_capital: float) -> float | None:
     """봇마다 이력 기록 스키마가 조금씩 달라서(equity_usdt/equity_krw/total_pnl_usdt...) 하나로 정규화."""
@@ -84,10 +169,10 @@ def _extract_history_equity(point: dict, initial_capital: float) -> float | None
 
 def get_bot_status(filename: str, script_name: str) -> dict:
     filepath = os.path.join(ROOT_DIR, filename)
-    is_running = script_name in running_processes and running_processes[script_name].poll() is None
+    is_running = _is_script_running(script_name)
 
     if not os.path.exists(filepath):
-        return {"status": "online" if is_running else "offline", "equity": 0, "pnl": 0, "positions": {}, "history": []}
+        return {"status": "online" if is_running else "offline", "equity": 0, "pnl": 0, "positions": {}, "history": [], "is_running": is_running}
 
     try:
         with open(filepath, "r") as f:
@@ -97,15 +182,18 @@ def get_bot_status(filename: str, script_name: str) -> dict:
 
 
         equity = data.get("equity_usdt", data.get("equity_usd", data.get("equity_krw", initial_capital)))
-        # 포지션에 들어간 원금(notional)도 총자산에 포함해야 한다 — equity는 진입 시 이미
-        # 원금만큼 차감된 "가용 현금"이라, 포지션 가치(원금+미실현손익)를 안 더하면 그만큼
-        # 화면에서 증발한 것처럼 보인다.
-        position_value = sum(
-            p.get("notional_usdt", p.get("notional_usd", p.get("notional_krw", 0)))
-            + p.get("unrealized_pnl_usdt", p.get("unrealized_pnl_usd", p.get("unrealized_pnl_krw", 0)))
-            for p in data.get("positions", {}).values()
-        )
-        total_equity = equity + position_value
+        if filename in EQUITY_ALREADY_INCLUDES_POSITIONS:
+            total_equity = equity
+        else:
+            # 포지션에 들어간 원금(notional)도 총자산에 포함해야 한다 — equity는 진입 시 이미
+            # 원금만큼 차감된 "가용 현금"이라, 포지션 가치(원금+미실현손익)를 안 더하면 그만큼
+            # 화면에서 증발한 것처럼 보인다.
+            position_value = sum(
+                p.get("notional_usdt", p.get("notional_usd", p.get("notional_krw", 0)))
+                + p.get("unrealized_pnl_usdt", p.get("unrealized_pnl_usd", p.get("unrealized_pnl_krw", 0)))
+                for p in data.get("positions", {}).values()
+            )
+            total_equity = equity + position_value
         pnl_pct = ((total_equity / initial_capital) - 1) * 100
 
         history = []
@@ -122,9 +210,10 @@ def get_bot_status(filename: str, script_name: str) -> dict:
             "pnl": pnl_pct,
             "positions": data.get("positions", {}),
             "history": history,
+            "is_running": is_running,
         }
     except Exception as e:
-        return {"status": "error", "equity": 0, "pnl": 0, "positions": {}, "history": []}
+        return {"status": "error", "equity": 0, "pnl": 0, "positions": {}, "history": [], "is_running": is_running}
 
 
 def get_live_bot_status(filename: str) -> dict:
@@ -169,46 +258,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         post_data = self.rfile.read(content_length).decode('utf-8')
         parsed = urllib.parse.parse_qs(post_data)
         
-        if self.path == '/start_category':
-            category_id = parsed.get('category', [''])[0]
-            if category_id in BOTS_CONFIG:
-                for bot_name, bot_info in BOTS_CONFIG[category_id]["bots"].items():
-                    script_name = bot_info["script"]
-                    # 이미 실행 중인지 확인
-                    if script_name not in running_processes or running_processes[script_name].poll() is not None:
-                        # 백그라운드 프로세스로 봇 실행 (표준 입출력은 무시)
-                        # sys.executable: 대시보드를 띄운 것과 같은 파이썬(venv 등)을 그대로 재사용
-                        # -u: stdout이 파일로 리다이렉트되면 기본이 블록버퍼링이라 print가 즉시 안 보임 — 강제로 언버퍼링
-                        log_file = open(os.path.join(ROOT_DIR, f"{script_name}.log"), "a")
-                        p = subprocess.Popen(
-                            [sys.executable, "-u", "-m", f"app.{script_name}"],
-                            cwd=ROOT_DIR,
-                            stdout=log_file,
-                            stderr=log_file
-                        )
-                        running_processes[script_name] = p
-                        print(f"[Dashboard] Started {script_name} (PID: {p.pid})")
-                
-            self.send_response(200)
+        if self.path == '/start_bot':
+            script_name = parsed.get('script', [''])[0]
+            bot_info = ALL_BOTS_BY_SCRIPT.get(script_name)
+            if bot_info:
+                _spawn_bot(script_name, bot_info["file"])
+                self.send_response(200)
+            else:
+                self.send_response(404)
             self.end_headers()
             self.wfile.write(b"OK")
             return
 
-        if self.path == '/stop_category':
-            category_id = parsed.get('category', [''])[0]
-            stopped = []
-            if category_id in BOTS_CONFIG:
-                for bot_name, bot_info in BOTS_CONFIG[category_id]["bots"].items():
-                    script_name = bot_info["script"]
-                    p = running_processes.get(script_name)
-                    if p is not None and p.poll() is None:
-                        p.terminate()
-                        stopped.append(script_name)
-                        print(f"[Dashboard] Stopped {script_name} (PID: {p.pid})")
-
+        if self.path == '/stop_bot':
+            script_name = parsed.get('script', [''])[0]
+            _stop_bot(script_name)
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(f"OK ({len(stopped)}개 정지)".encode('utf-8'))
+            self.wfile.write(b"OK")
             return
 
     def do_GET(self):
@@ -264,7 +331,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 pnl = data["pnl"]
                 pnl_data.append(round(pnl, 2))
                 bg_colors.append("'rgba(16, 185, 129, 0.8)'" if pnl >= 0 else "'rgba(239, 68, 68, 0.8)'")
-                
+                script_name = cat_info["bots"][name]["script"]
+
+                if data["is_running"]:
+                    bot_toggle_btn = f'<button onclick="event.stopPropagation(); stopBot(\'{script_name}\')" class="text-xs bg-rose-600/80 hover:bg-rose-500 text-white px-2 py-1 rounded font-bold">정지</button>'
+                else:
+                    bot_toggle_btn = f'<button onclick="event.stopPropagation(); startBot(\'{script_name}\')" class="text-xs bg-emerald-600/80 hover:bg-emerald-500 text-white px-2 py-1 rounded font-bold">시작</button>'
+
                 if "online" in data["status"]:
                     status_badge = '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-900 text-green-300"><span class="w-2 h-2 mr-1.5 bg-green-400 rounded-full animate-pulse"></span>Running</span>'
                     border_cls = "border-blue-500/30"
@@ -306,9 +379,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
                 cards_html += f"""
                 <div onclick="openHistory('{hist_id}')" class="cursor-pointer bg-gray-800/40 backdrop-blur-md rounded-xl border {border_cls} p-6 shadow-2xl transition-all hover:bg-gray-800/60 hover:ring-1 hover:ring-emerald-500/50">
-                    <div class="flex justify-between items-start mb-4">
-                        <h3 class="text-lg font-bold text-gray-100">{name}</h3>
-                        {status_badge}
+                    <div class="mb-4">
+                        <h3 class="text-lg font-bold text-gray-100 truncate" title="{name}">{name}</h3>
+                        <div class="flex items-center gap-2 mt-2">
+                            {status_badge}
+                            {bot_toggle_btn}
+                        </div>
                     </div>
                     <div class="mb-6">
                         <div class="text-sm text-gray-400 mb-1">Total Equity</div>
@@ -332,18 +408,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             <div id="tab-{cat_id}" class="tab-content {hidden_class} animate-fade-in">
                 <div class="flex justify-between items-center mb-6">
                     <h2 class="text-2xl font-extrabold text-white">{title} 전략 보드</h2>
-                    <div class="flex gap-2">
-                        <button onclick="startCategory('{cat_id}')" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg shadow-lg font-bold flex items-center transition-transform active:scale-95">
-                            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                            해당 리그 봇 전체 가동
-                        </button>
-                        <button onclick="stopCategory('{cat_id}')" class="bg-rose-600 hover:bg-rose-500 text-white px-4 py-2 rounded-lg shadow-lg font-bold flex items-center transition-transform active:scale-95">
-                            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10h6v4H9z"></path></svg>
-                            전체 정지
-                        </button>
-                    </div>
+                    <p class="text-xs text-gray-500">카드 우측 상단의 시작/정지 버튼으로 봇을 하나씩 골라서 켜고 끄세요</p>
                 </div>
-                
+
                 <div class="bg-gray-800/40 backdrop-blur-md rounded-xl border border-gray-700 p-6 mb-8 shadow-2xl">
                     <h3 class="text-lg font-bold text-gray-200 mb-4 text-center">전략별 수익률 비교 (ROI %)</h3>
                     <div class="h-64 w-full">
@@ -428,9 +495,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             live_cards_html += f"""
             <div onclick="openHistory('{hist_id}')" class="cursor-pointer bg-gray-800/40 backdrop-blur-md rounded-xl border {border_cls} p-6 shadow-2xl transition-all hover:bg-gray-800/60 hover:ring-1 hover:ring-red-500/50">
-                <div class="flex justify-between items-start mb-4">
-                    <h3 class="text-lg font-bold text-gray-100">{bot_name}</h3>
-                    {status_badge}
+                <div class="mb-4">
+                    <h3 class="text-lg font-bold text-gray-100 truncate" title="{bot_name}">{bot_name}</h3>
+                    <div class="mt-2">{status_badge}</div>
                 </div>
                 <div class="mb-6">
                     <div class="text-sm text-gray-400 mb-1">누적 손익 (실현+평가)</div>
@@ -615,37 +682,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     }}
                 }}
 
-                // Start 버튼 로직
-                function startCategory(catId) {{
-                    fetch('/start_category', {{
+                // 개별 봇 시작/정지 — 카드 하나 단위로만 켜고 끈다 (카테고리 일괄가동 버튼은 제거함)
+                function startBot(script) {{
+                    fetch('/start_bot', {{
                         method: 'POST',
                         headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-                        body: 'category=' + encodeURIComponent(catId)
-                    }}).then(res => {{
-                        if(res.ok) {{
-                            alert(catId + " 리그의 모든 봇 가동 명령을 전송했습니다!\\n백그라운드에서 순차적으로 실행됩니다.");
-                            // 새로고침을 잠깐 미뤄서 서버가 켜질 시간을 줌
-                            setTimeout(() => window.location.reload(), 1500);
-                        }} else {{
-                            alert("실행 실패!");
-                        }}
-                    }});
+                        body: 'script=' + encodeURIComponent(script)
+                    }}).then(() => setTimeout(() => window.location.reload(), 800));
                 }}
 
-                // Stop 버튼 로직
-                function stopCategory(catId) {{
-                    fetch('/stop_category', {{
+                function stopBot(script) {{
+                    fetch('/stop_bot', {{
                         method: 'POST',
                         headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
-                        body: 'category=' + encodeURIComponent(catId)
-                    }}).then(res => {{
-                        if(res.ok) {{
-                            alert(catId + " 리그의 모든 봇 정지 명령을 전송했습니다.");
-                            setTimeout(() => window.location.reload(), 1000);
-                        }} else {{
-                            alert("정지 실패!");
-                        }}
-                    }});
+                        body: 'script=' + encodeURIComponent(script)
+                    }}).then(() => setTimeout(() => window.location.reload(), 800));
                 }}
 
                 {scripts_html}

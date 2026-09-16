@@ -21,3 +21,4 @@ docs/app-파일-인벤토리.md
 
 # 로컬 대시보드(app/dashboard.py)가 루트에 쓰는 페이퍼봇 상태파일 — 개인 트레이딩 데이터라 커밋 안 함
 /*_state.json
+.state_archive/

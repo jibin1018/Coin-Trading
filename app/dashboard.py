@@ -1,8 +1,8 @@
-"""프리미엄 퀀트 대시보드 (Web UI) - 탭 분리 & 자동 실행 컨트롤러 포함
+"""로컬 투자 포트폴리오 사이트 (Web UI) - 코인/주식/실전투자 탭 + 자동 실행 컨트롤러 포함
 
-Tailwind CSS와 Chart.js를 사용하며, 
-코인/미국주식/한국주식을 탭(Tab)으로 나누어 보여주고
+Tailwind CSS와 Chart.js를 사용하며, 코인/주식 페이퍼봇을 포트폴리오 형태로 보여주고
 대시보드 내에서 직접 봇을 백그라운드로 실행할 수 있는 기능(Process Manager)을 포함합니다.
+"실전투자" 탭은 실제 자금이 걸린 봇(TRX 실계좌)을 type-to-confirm 게이트를 거쳐 제어합니다.
 """
 from __future__ import annotations
 
@@ -17,10 +17,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # 탭(Tab)별 봇 설정 및 실행 대상 스크립트
 BOTS_CONFIG = {
     "Crypto": {
-        "title": "🪙 Crypto (코인)",
+        "title": "🪙 코인",
         "bots": {
             "기본 모멘텀 로테이션": {"file": "momentum_state.json", "script": "momentum_rotation_loop"},
             "Freqtrade 차트 봇": {"file": "freqtrade_paper_state.json", "script": "freqtrade_paper_loop"},
+            "업비트 BB+RSI (KRW 현물)": {"file": "upbit_paper_state.json", "script": "upbit_paper_loop"},
             "AI 뉴스 트레이딩 봇": {"file": "ai_news_paper_state.json", "script": "ai_news_paper_loop"},
             "하이브리드 (차트+AI) 봇": {"file": "hybrid_paper_state.json", "script": "hybrid_paper_loop"},
             "페어 트레이딩 (통계적 차익)": {"file": "pairs_paper_state.json", "script": "pairs_paper_loop"},
@@ -29,33 +30,33 @@ BOTS_CONFIG = {
             "머신러닝(ML) 예측 봇": {"file": "ml_paper_state.json", "script": "ml_paper_loop"},
         }
     },
-    "US_Stock": {
-        "title": "🇺🇸 US Stock (미국 주식)",
+    "Stock": {
+        "title": "📈 주식",
         "bots": {
-            "미국 주식 AI 하이브리드": {"file": "stock_hybrid_state.json", "script": "stock_hybrid_paper_loop"},
-            # 향후 추가될 봇들을 위해 예약됨
-        }
-    },
-    "KR_Stock": {
-        "title": "🇰🇷 KR Stock (한국 주식)",
-        "bots": {
-            "한국 주식 AI 하이브리드": {"file": "kr_hybrid_state.json", "script": "kr_hybrid_paper_loop"},
-            "Dual Thrust (yfinance 페이퍼, KIS 키 불필요)": {"file": "kr_dual_thrust_paper_state.json", "script": "kr_dual_thrust_paper_loop"},
-            "Dual Thrust (KIS 모의투자 실연동)": {"file": "kr_dual_thrust_state.json", "script": "kr_dual_thrust_kis_loop"},
+            "미국 주식 AI 하이브리드": {"file": "stock_hybrid_state.json", "script": "stock_hybrid_paper_loop", "flag": "🇺🇸"},
+            "한국 주식 AI 하이브리드": {"file": "kr_hybrid_state.json", "script": "kr_hybrid_paper_loop", "flag": "🇰🇷"},
+            "Dual Thrust (yfinance 페이퍼, KIS 키 불필요)": {"file": "kr_dual_thrust_paper_state.json", "script": "kr_dual_thrust_paper_loop", "flag": "🇰🇷"},
+            "Dual Thrust (KIS 모의투자 실연동)": {"file": "kr_dual_thrust_state.json", "script": "kr_dual_thrust_kis_loop", "flag": "🇰🇷"},
         }
     }
 }
 
-# 실제 자금이 걸린 실전투자 봇 — 위 BOTS_CONFIG(전부 페이퍼/모의투자)와 절대 같은 방식으로
-# 다루면 안 된다. 운영 서버(Docker/AI_Ochestration)에서만 가동/중지하고, 이 로컬 대시보드는
-# 상태파일을 읽어 조회만 한다 — Start/Stop 버튼도, running_processes 관리도 일부러 안 붙였다
-# (여기서 실수로 버튼 한 번 눌렀다고 로컬에서 진짜 돈이 움직이는 사고를 막기 위함).
-LIVE_BOTS_CONFIG = {
-    "title": "🔴 실전투자 (Live · 실제 자금)",
-    "bots": {
-        "TRX 스윙 실계좌": {"file": "trx_swing_state.json", "script": "trx_swing_loop"},
-    }
-}
+# 실제 자금이 걸린 실전투자 봇(TRX 스윙, 펀딩비 차익거래)은 Coin-Trading-Live라는 별도
+# 저장소로 분리됐다 — 같은 실계좌를 로컬/운영 두 곳에서 동시에 건드리는 사고를 막기 위해
+# 이 대시보드에서는 더 이상 가동/조회하지 않는다. 아래는 안내 카드로만 띄운다.
+LIVE_BOTS_TITLE = "🔴 실전투자"
+LIVE_BOTS_ELSEWHERE = [
+    {"name": "TRX 스윙 실계좌", "reason": "Coin-Trading-Live 저장소로 분리됨 — 거기서 가동/정지"},
+    {"name": "펀딩비 차익거래", "reason": "Coin-Trading-Live 저장소로 분리됨 — 거기서 가동/정지"},
+]
+
+# 아직 실거래 코드/계정이 준비 안 돼서 버튼을 비활성 상태로만 보여주는 항목.
+# (KIS는 모의투자 전용 도메인만 지원, 실전 앱키 별도신청+코드확장 필요 / 토스는 app/toss_auth.py
+# 참고 — API가 2026년에 막 나와서 실제 엔드포인트 스펙 확보 전까지 완성 불가)
+LIVE_BOTS_COMING_SOON = [
+    {"name": "국내 주식 실거래 (KIS)", "reason": "실전 앱키 미발급 + 코드가 모의투자 도메인만 지원"},
+    {"name": "국내/미국 주식 실거래 (토스증권)", "reason": "Open API 승인 대기 — 실제 엔드포인트 스펙 확보 전"},
+]
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 
@@ -66,8 +67,20 @@ INITIAL_CAPITAL_BY_FILE = {
     "stock_hybrid_state.json": 700.0,  # ≈100만원
     "kr_dual_thrust_state.json": 1000000.0,  # 100만원 (KIS 실연동, app/kr_dual_thrust_kis_loop.py 예산과 맞춤)
     "kr_dual_thrust_paper_state.json": 1000000.0,  # 100만원 (yfinance 페이퍼 버전, 위와 동일 예산)
+    "upbit_paper_state.json": 100000.0,  # 10만원 (app/upbit_paper_loop.py 예산과 맞춤)
 }
 DEFAULT_INITIAL_CAPITAL = 70.0  # ≈10만원, 나머지 신규 페이퍼봇 공통
+
+# 카드/포트폴리오 합산에 쓰는 화폐 단위. 예전엔 탭 이름("KR" 포함 여부)으로 추측했는데, 코인
+# 탭에 업비트(KRW)가 섞이면서 더 이상 안 맞는다 — 파일 기준으로 명시적으로 관리한다.
+CURRENCY_BY_FILE = {
+    "kr_hybrid_state.json": "KRW",
+    "kr_dual_thrust_state.json": "KRW",
+    "kr_dual_thrust_paper_state.json": "KRW",
+    "upbit_paper_state.json": "KRW",
+    "stock_hybrid_state.json": "USD",
+}
+DEFAULT_CURRENCY = "USD"
 
 # 신규 페이퍼봇 9개는 진입 시 equity에서 원금을 차감하는 방식(equity=가용현금)이라 대시보드가
 # 포지션 가치를 더해줘야 하는데, momentum_rotation_loop.py(기존 원본 봇)는 리밸런스마다
@@ -171,8 +184,10 @@ def get_bot_status(filename: str, script_name: str) -> dict:
     filepath = os.path.join(ROOT_DIR, filename)
     is_running = _is_script_running(script_name)
 
+    currency = CURRENCY_BY_FILE.get(filename, DEFAULT_CURRENCY)
+
     if not os.path.exists(filepath):
-        return {"status": "online" if is_running else "offline", "equity": 0, "pnl": 0, "positions": {}, "history": [], "is_running": is_running}
+        return {"status": "online" if is_running else "offline", "equity": 0, "pnl": 0, "positions": {}, "history": [], "is_running": is_running, "currency": currency}
 
     try:
         with open(filepath, "r") as f:
@@ -211,46 +226,11 @@ def get_bot_status(filename: str, script_name: str) -> dict:
             "positions": data.get("positions", {}),
             "history": history,
             "is_running": is_running,
+            "currency": currency,
         }
     except Exception as e:
-        return {"status": "error", "equity": 0, "pnl": 0, "positions": {}, "history": [], "is_running": is_running}
+        return {"status": "error", "equity": 0, "pnl": 0, "positions": {}, "history": [], "is_running": is_running, "currency": currency}
 
-
-def get_live_bot_status(filename: str) -> dict:
-    """실전투자 봇은 고정 시작자본 개념이 없다(계좌 잔고를 그때그때 실시간 조회) — 그래서
-    수익률(%) 대신 누적 손익(USDT) 절대값으로 보여준다. 상태파일은 운영 서버(Docker)가
-    쓰는 것이라 로컬에 없을 수도 있다 — 그 경우 '연결 안 됨'으로 표시한다."""
-    filepath = os.path.join(ROOT_DIR, filename)
-    if not os.path.exists(filepath):
-        return {"connected": False, "total_pnl_usdt": 0.0, "positions": {}, "history": [], "halted": False, "drawdown": 0.0}
-
-    try:
-        with open(filepath, "r") as f:
-            data = json.load(f)
-
-        history = [
-            {"ts": p["ts"], "value": p.get("total_pnl_usdt", 0.0)}
-            for p in data.get("equity_history", []) if p.get("ts")
-        ]
-        total_pnl = history[-1]["value"] if history else data.get("cumulative_realized_pnl_usdt", 0.0)
-
-        positions = {}
-        position = data.get("position")
-        if position:
-            pos_hist = data.get("position_history", {}).get("TRX", [])
-            last_unrealized = pos_hist[-1]["unrealized_pnl_usdt"] if pos_hist else 0.0
-            positions["TRX"] = {**position, "side": "long", "unrealized_pnl_usdt": last_unrealized}
-
-        return {
-            "connected": True,
-            "total_pnl_usdt": total_pnl,
-            "positions": positions,
-            "history": history,
-            "halted": bool(data.get("halted", False)),
-            "drawdown": data.get("drawdown", 0.0),
-        }
-    except Exception:
-        return {"connected": False, "total_pnl_usdt": 0.0, "positions": {}, "history": [], "halted": False, "drawdown": 0.0}
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -293,15 +273,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             for bot_name, bot_info in cat_info["bots"].items():
                 results[cat_id][bot_name] = get_bot_status(bot_info["file"], bot_info["script"])
 
-        live_results = {
-            bot_name: get_live_bot_status(bot_info["file"])
-            for bot_name, bot_info in LIVE_BOTS_CONFIG["bots"].items()
-        }
-
-        html = self.generate_html(results, live_results)
+        html = self.generate_html(results)
         self.wfile.write(html.encode('utf-8'))
 
-    def generate_html(self, results: dict, live_results: dict) -> str:
+    def generate_html(self, results: dict) -> str:
         tabs_nav_html = ""
         tabs_content_html = ""
         scripts_html = ""
@@ -325,13 +300,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             pnl_data = []
             bg_colors = []
             cards_html = ""
-            
+            totals_by_currency = {"USD": 0.0, "KRW": 0.0}
+
             for name, data in results[cat_id].items():
                 labels.append(name)
                 pnl = data["pnl"]
                 pnl_data.append(round(pnl, 2))
                 bg_colors.append("'rgba(16, 185, 129, 0.8)'" if pnl >= 0 else "'rgba(239, 68, 68, 0.8)'")
                 script_name = cat_info["bots"][name]["script"]
+                currency = data["currency"]
+                totals_by_currency[currency] += data["equity"]
+                flag = cat_info["bots"][name].get("flag", "")
 
                 if data["is_running"]:
                     bot_toggle_btn = f'<button onclick="event.stopPropagation(); stopBot(\'{script_name}\')" class="text-xs bg-rose-600/80 hover:bg-rose-500 text-white px-2 py-1 rounded font-bold">정지</button>'
@@ -356,9 +335,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         side_color = "text-emerald-400" if side == "UP" else "text-rose-400"
                         upnl = p.get('unrealized_pnl_usdt', p.get('unrealized_pnl_usd', p.get('unrealized_pnl_krw', 0)))
                         upnl_color = "text-emerald-400" if upnl >= 0 else "text-rose-400"
-                        symbol = "₩" if "KR" in cat_id else "$"
+                        symbol = "₩" if currency == "KRW" else "$"
                         # f-string 포맷 스펙 안에는 if/else 조건식을 못 넣는다 — 미리 문자열로 만들어둔다
-                        upnl_fmt = f"{upnl:+,.0f}" if "KR" in cat_id else f"{upnl:+.2f}"
+                        upnl_fmt = f"{upnl:+,.0f}" if currency == "KRW" else f"{upnl:+.2f}"
                         pos_html += f"""
                         <div class="flex justify-between items-center py-2 border-b border-gray-700/50 last:border-0">
                             <div>
@@ -371,16 +350,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 else:
                     pos_html = '<div class="text-gray-500 text-sm py-2 italic text-center">관망 중 (포지션 없음)</div>'
                 
-                currency_symbol = "₩" if "KR" in cat_id else "$"
-                equity_fmt = f"{data['equity']:,.0f}" if "KR" in cat_id else f"{data['equity']:,.2f}"
+                currency_symbol = "₩" if currency == "KRW" else "$"
+                equity_fmt = f"{data['equity']:,.0f}" if currency == "KRW" else f"{data['equity']:,.2f}"
 
                 hist_id = f"h{len(hist_data_all)}"
                 hist_data_all[hist_id] = {"label": name, "history": data["history"], "unit": "pct"}
 
+                flag_prefix = f"{flag} " if flag else ""
                 cards_html += f"""
                 <div onclick="openHistory('{hist_id}')" class="cursor-pointer bg-gray-800/40 backdrop-blur-md rounded-xl border {border_cls} p-6 shadow-2xl transition-all hover:bg-gray-800/60 hover:ring-1 hover:ring-emerald-500/50">
                     <div class="mb-4">
-                        <h3 class="text-lg font-bold text-gray-100 truncate" title="{name}">{name}</h3>
+                        <h3 class="text-lg font-bold text-gray-100 truncate" title="{name}">{flag_prefix}{name}</h3>
                         <div class="flex items-center gap-2 mt-2">
                             {status_badge}
                             {bot_toggle_btn}
@@ -402,13 +382,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data_str = "[" + ", ".join(str(d) for d in pnl_data) + "]"
             colors_str = "[" + ", ".join(bg_colors) + "]"
             chart_id = f"pnlChart_{cat_id}"
-            
+
+            # 포트폴리오 요약 바 — 화폐를 섞지 않고 보유한 화폐별로만 합산해서 보여준다.
+            summary_badges = ""
+            if totals_by_currency["USD"] > 0:
+                summary_badges += f"""
+                <div>
+                    <div class="text-xs text-gray-500 uppercase tracking-wider">총자산 (USD)</div>
+                    <div class="text-3xl font-mono font-bold text-white">${totals_by_currency['USD']:,.2f}</div>
+                </div>
+                """
+            if totals_by_currency["KRW"] > 0:
+                summary_badges += f"""
+                <div>
+                    <div class="text-xs text-gray-500 uppercase tracking-wider">총자산 (KRW)</div>
+                    <div class="text-3xl font-mono font-bold text-white">₩{totals_by_currency['KRW']:,.0f}</div>
+                </div>
+                """
+
             # 각 탭의 콘텐츠 영역
             tabs_content_html += f"""
             <div id="tab-{cat_id}" class="tab-content {hidden_class} animate-fade-in">
                 <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-2xl font-extrabold text-white">{title} 전략 보드</h2>
+                    <h2 class="text-2xl font-extrabold text-white">{title} 포트폴리오</h2>
                     <p class="text-xs text-gray-500">카드 우측 상단의 시작/정지 버튼으로 봇을 하나씩 골라서 켜고 끄세요</p>
+                </div>
+
+                <div class="flex flex-wrap gap-10 mb-8 bg-gray-800/40 backdrop-blur-md rounded-xl border border-gray-700 p-6 shadow-2xl">
+                    {summary_badges}
                 </div>
 
                 <div class="bg-gray-800/40 backdrop-blur-md rounded-xl border border-gray-700 p-6 mb-8 shadow-2xl">
@@ -452,82 +453,51 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 }});
             """
 
-        # 실전투자(Live) 탭 — 페이퍼봇 탭들과 별도 루프. Start/Stop 버튼도, ROI% 비교차트도 없다
-        # (고정 시작자본이 없어 %가 의미 없고, 여기서 실수로 실제 매매를 켜는 사고를 막기 위함).
-        live_cards_html = ""
-        for bot_name, bot_info in LIVE_BOTS_CONFIG["bots"].items():
-            d = live_results[bot_name]
+        # 실전투자(Live) 탭 — 실제 자금이 걸린 봇은 Coin-Trading-Live 저장소로 분리됐다.
+        # 여기는 안내 카드만 띄운다(가동/정지 버튼 없음 — 로컬/운영 동시실행 사고 방지).
+        tabs_nav_html += f"""
+            <button class="tab-btn flex-1 py-4 text-center border-b-2 font-medium text-sm sm:text-base border-transparent text-red-400/70 hover:text-red-300 hover:border-red-300 transition-colors" data-target="tab-Live">
+                {LIVE_BOTS_TITLE}
+            </button>
+        """
 
-            if not d["connected"]:
-                status_badge = '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400">연결 안 됨</span>'
-                border_cls = "border-gray-700"
-            elif d["halted"]:
-                status_badge = '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-rose-900 text-rose-300">🛑 킬스위치 정지</span>'
-                border_cls = "border-rose-500/50"
-            else:
-                status_badge = '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-900 text-red-300"><span class="w-2 h-2 mr-1.5 bg-red-400 rounded-full animate-pulse"></span>실계좌 가동중</span>'
-                border_cls = "border-red-500/30"
-
-            pnl = d["total_pnl_usdt"]
-            pnl_cls = "text-emerald-400" if pnl >= 0 else "text-rose-400"
-            pnl_sign = "+" if pnl > 0 else ""
-
-            if d["positions"]:
-                pos = d["positions"]["TRX"]
-                upnl = pos.get("unrealized_pnl_usdt", 0.0)
-                upnl_color = "text-emerald-400" if upnl >= 0 else "text-rose-400"
-                live_pos_html = f"""
-                <div class="flex justify-between items-center py-2">
-                    <div>
-                        <span class="font-bold text-gray-200">TRX</span>
-                        <span class="text-xs ml-2 font-mono text-gray-500">{pos.get('qty', 0):.2f}개 @ {pos.get('entry_price', 0):.5f}</span>
-                    </div>
-                    <div class="font-mono text-sm {upnl_color}">{upnl:+.2f} $</div>
+        elsewhere_html = ""
+        for item in LIVE_BOTS_ELSEWHERE:
+            elsewhere_html += f"""
+            <div class="bg-gray-800/30 rounded-xl border border-red-500/20 p-6">
+                <div class="flex justify-between items-start mb-4">
+                    <h3 class="text-lg font-bold text-gray-200 truncate">{item['name']}</h3>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-900/50 text-red-300">별도 저장소</span>
                 </div>
-                """
-            elif d["connected"]:
-                live_pos_html = '<div class="text-gray-500 text-sm py-2 italic text-center">관망 중 (포지션 없음)</div>'
-            else:
-                live_pos_html = '<div class="text-gray-500 text-sm py-2 italic text-center">운영 서버 상태파일을 로컬에서 찾을 수 없음</div>'
-
-            hist_id = f"h{len(hist_data_all)}"
-            hist_data_all[hist_id] = {"label": bot_name, "history": d["history"], "unit": "usdt"}
-
-            live_cards_html += f"""
-            <div onclick="openHistory('{hist_id}')" class="cursor-pointer bg-gray-800/40 backdrop-blur-md rounded-xl border {border_cls} p-6 shadow-2xl transition-all hover:bg-gray-800/60 hover:ring-1 hover:ring-red-500/50">
-                <div class="mb-4">
-                    <h3 class="text-lg font-bold text-gray-100 truncate" title="{bot_name}">{bot_name}</h3>
-                    <div class="mt-2">{status_badge}</div>
-                </div>
-                <div class="mb-6">
-                    <div class="text-sm text-gray-400 mb-1">누적 손익 (실현+평가)</div>
-                    <div class="text-2xl font-mono font-bold {pnl_cls}">{pnl_sign}{pnl:,.2f} USDT</div>
-                    <div class="text-sm font-mono mt-1 text-gray-500">드로다운 {d['drawdown']*100:.1f}%</div>
-                </div>
-                <div class="bg-gray-900/50 rounded-lg p-4 border border-gray-700/50">
-                    <div class="text-xs uppercase text-gray-500 font-bold mb-2 tracking-wider">Position</div>
-                    {live_pos_html}
-                </div>
+                <div class="text-sm text-gray-500">{item['reason']}</div>
             </div>
             """
 
-        tabs_nav_html += f"""
-            <button class="tab-btn flex-1 py-4 text-center border-b-2 font-medium text-sm sm:text-base border-transparent text-red-400/70 hover:text-red-300 hover:border-red-300 transition-colors" data-target="tab-Live">
-                {LIVE_BOTS_CONFIG['title']}
-            </button>
-        """
+        coming_soon_html = ""
+        for item in LIVE_BOTS_COMING_SOON:
+            coming_soon_html += f"""
+            <div class="bg-gray-800/20 rounded-xl border border-gray-700/50 p-6 opacity-60">
+                <div class="flex justify-between items-start mb-4">
+                    <h3 class="text-lg font-bold text-gray-400 truncate">{item['name']}</h3>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-500">준비 중</span>
+                </div>
+                <div class="text-sm text-gray-500">{item['reason']}</div>
+            </div>
+            """
 
         tabs_content_html += f"""
         <div id="tab-Live" class="tab-content hidden animate-fade-in">
             <div class="flex justify-between items-center mb-6">
-                <h2 class="text-2xl font-extrabold text-white">{LIVE_BOTS_CONFIG['title']}</h2>
+                <h2 class="text-2xl font-extrabold text-white">{LIVE_BOTS_TITLE}</h2>
             </div>
             <div class="bg-red-950/40 border border-red-500/40 rounded-xl p-4 mb-8 text-sm text-red-200">
-                ⚠️ 이 탭의 봇은 <b>실제 계좌 자금</b>으로 매매합니다. 가동/중지는 이 로컬 대시보드가 아니라
-                운영 서버(Docker · AI_Ochestration)에서만 합니다 — 여기서는 상태파일을 읽어 조회만 합니다.
+                ⚠️ 실제 자금이 걸린 봇은 이 대시보드가 아니라 <b>별도 저장소(Coin-Trading-Live)</b>
+                에서 관리합니다 — 로컬/운영 서버 양쪽에서 같은 실계좌를 동시에 건드리는 사고를
+                막기 위해 여기서는 가동/정지를 하지 않습니다.
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                {live_cards_html}
+                {elsewhere_html}
+                {coming_soon_html}
             </div>
         </div>
         """
@@ -540,7 +510,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Quant Trading Terminal</title>
+            <title>My Portfolio</title>
             <meta http-equiv="refresh" content="10">
             <script src="https://cdn.tailwindcss.com"></script>
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -555,9 +525,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 <header class="mb-8 text-center md:text-left flex flex-col md:flex-row justify-between items-center">
                     <div>
                         <h1 class="text-3xl md:text-4xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 tracking-tight">
-                            Quant Trading Terminal
+                            My Portfolio
                         </h1>
-                        <p class="text-gray-400 mt-2 text-sm">서버 내장형 자동 실행 & 실시간 모니터링 시스템</p>
+                        <p class="text-gray-400 mt-2 text-sm">코인·주식 모의투자 + 실전투자를 한 곳에서</p>
                     </div>
                 </header>
 

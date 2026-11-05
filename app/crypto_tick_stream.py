@@ -1,5 +1,7 @@
-"""바이낸스 공개 시세 웹소켓 실시간 체결가/펀딩비 수신 — 3개 코인봇(펀딩비차익, TRX 스윙,
-모멘텀 로테이션)이 쓰는 종목 전부를 한 프로세스에서 커버한다.
+"""바이낸스 공개 시세 웹소켓 실시간 체결가/펀딩비 수신 — 모멘텀 로테이션(모의투자) +
+펀딩비차익/TRX 스윙(실전투자, Coin-Trading-Live 저장소로 분리됨) 심볼을 전부 한 프로세스에서
+커버한다. 실전투자 봇들은 이 틱을 실제 매매 판단에 쓰지 않으므로(아래 참고) 심볼만 맞춰서
+여기 남겨뒀다 — 실전투자 쪽 심볼이 바뀌면 FUNDING_ARB_BASES도 같이 맞춰야 한다.
 
 바이낸스 공개 마켓데이터 스트림은 API 키/인증 자체가 필요없다(KIS 웹소켓과 가장 큰 차이).
 스팟(stream.binance.com)과 무기한선물(fstream.binance.com)은 호스트가 달라 커넥션을 둘로
@@ -22,7 +24,9 @@ import websockets
 from app.crypto_tick_state import load_state, log_event, now_iso, save_state
 from app.tick_archive import append_batch
 from app.momentum_rotation_loop import UNIVERSE as MOMENTUM_UNIVERSE
-from app.paper_funding_arb import SYMBOLS as FUNDING_ARB_BASES
+# 펀딩비 차익거래 봇(실전투자, Coin-Trading-Live 저장소로 분리됨)의 심볼 목록 — 그
+# 저장소의 app/paper_funding_arb.py SYMBOLS와 반드시 맞춰서 유지한다.
+FUNDING_ARB_BASES = ["ETH", "XRP", "DOGE"]
 
 SPOT_WS_URL = "wss://stream.binance.com:9443/stream"
 FUTURES_WS_URL = "wss://fstream.binance.com/stream"

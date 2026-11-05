@@ -1,9 +1,13 @@
 """Dual Thrust 돌파매매(app/dual_thrust_paper_loop.py) 백테스트.
 
 페이퍼봇과 동일한 규칙을 과거 데이터로 재현한다: 전날까지 3일간의 레인지로 오늘의
-상단/하단선을 계산하고, 종가가 상단을 뚫으면 롱/하단을 뚫으면 숏, 반대 선을 뚫으면
-즉시 반전(stop-and-reverse)한다. 페이퍼봇은 5분 간격으로 체크하지만, 여기서는 1시간봉
-종가로 근사한다(돌파 시점의 정확한 슬리피지는 반영 안 됨 — 실측은 이보다 나쁠 수 있음).
+상단/하단선을 계산하고, 종가가 상단을 뚫으면 롱 진입, 보유 중 하단을 뚫으면 청산(관망)
+한다. 페이퍼봇은 5분 간격으로 체크하지만, 여기서는 1시간봉 종가로 근사한다(돌파 시점의
+정확한 슬리피지는 반영 안 됨 — 실측은 이보다 나쁠 수 있음).
+
+원래는 하단 이탈 시 숏으로 즉시 반전(stop-and-reverse)했는데, 백테스트 결과 코인 시장의
+구조적 상승 구간에서 숏 레그가 수익을 계속 깎아먹는 것으로 확인돼(평균 수익률은
++112.78%였지만 매수보유 대비 -338.62%p) 숏 레그를 빼고 롱온리+관망으로 바꿨다.
 
 주의: 선물 가격만 재현하고 펀딩비는 미반영(app/futures_data.py 참고) — 방향성 포지션을
 8시간 이상 들고 가는 구조라 펀딩비 영향이 특히 클 수 있다.
@@ -63,28 +67,19 @@ def _simulate(symbol: str, since: str, until: str | None, start_capital: float) 
         buy_line, sell_line = bounds.loc[day, "buy_line"], bounds.loc[day, "sell_line"]
         price = row["Close"]
 
-        if position is not None:
-            direction = 1 if position["side"] == "long" else -1
-            should_exit = (position["side"] == "long" and price < sell_line) or \
-                          (position["side"] == "short" and price > buy_line)
-            if should_exit:
-                pnl = budget * direction * (price / position["entry_price"] - 1) - budget * FEE_PCT / 100
-                cash += pnl
-                n_trades += 1
-                position = None
+        if position is not None and price < sell_line:
+            pnl = budget * (price / position["entry_price"] - 1) - budget * FEE_PCT / 100
+            cash += pnl
+            n_trades += 1
+            position = None
 
-        if position is None:
-            if price > buy_line:
-                position = {"side": "long", "entry_price": price}
-                cash -= budget * FEE_PCT / 100
-            elif price < sell_line:
-                position = {"side": "short", "entry_price": price}
-                cash -= budget * FEE_PCT / 100
+        if position is None and price > buy_line:
+            position = {"side": "long", "entry_price": price}
+            cash -= budget * FEE_PCT / 100
 
         unrealized = 0.0
         if position is not None:
-            direction = 1 if position["side"] == "long" else -1
-            unrealized = budget * direction * (price / position["entry_price"] - 1)
+            unrealized = budget * (price / position["entry_price"] - 1)
         equity_curve.append(cash + unrealized)
 
     equity = pd.Series(equity_curve, index=hourly.index[-len(equity_curve):])

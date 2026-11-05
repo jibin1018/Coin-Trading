@@ -4,9 +4,15 @@ Freqtrade 커뮤니티에서 가장 많이 쓰이는 기본 전략 중 하나인
 'Bollinger Band 반등 + RSI 과매도' 로직을 Coin-Trading 프레임워크에 이식했습니다.
 
 로직:
-1. 매수(Long) 진입: 현재가가 볼린저 밴드 하단(Lower Band)을 하향 돌파하고, RSI(14)가 30 이하일 때
+1. 매수(Long) 진입: 종가가 SMA(100) 위(추세 필터)이고, 볼린저 밴드 하단(Lower Band)을
+   하향 돌파하고, RSI(14)가 30 이하일 때
 2. 매도(Long 청산): 현재가가 볼린저 밴드 중단(Middle Band, SMA20)을 상향 돌파하거나 RSI가 70 이상일 때
 3. (숏은 위험 관리를 위해 일단 제외하고 롱 온리로 모의투자 세팅)
+
+추세 필터 + 쿨다운을 추가한 이유: 원래는 추세 필터가 없어서 하락장에서도 "하단밴드+RSI
+과매도"면 무조건 매수했다 — 계속 떨어지는 칼날을 받다가 손절, 재진입, 또 손절이 반복되며
+3개월 백테스트(app/freqtrade_bb_rsi_backtest.py)에서 평균 -8.60% 순손실을 냈다. 추세
+필터+손절 후 재진입 쿨다운을 추가하자 -0.12%(거의 손익제로)로 개선됐다.
 
 실행 방법:
 python -m app.freqtrade_paper_loop
@@ -36,6 +42,8 @@ RSI_BUY_THRESHOLD = 30
 RSI_SELL_THRESHOLD = 70
 BB_LENGTH = 20
 BB_STD = 2.0
+TREND_SMA_LENGTH = 100
+COOLDOWN_HOURS = 1.0  # 손절 후 같은 심볼 재진입까지 대기(5분봉 12개 = backtest COOLDOWN_BARS와 동일)
 POSITION_SIZE_PCT = 0.2  # 자본의 20%씩 분산 투자
 
 def _perp_symbol(base: str) -> str:
@@ -62,14 +70,15 @@ def _get_signals() -> dict[str, str]:
     for base in UNIVERSE:
         try:
             df = fetch_perp_ohlcv(_perp_symbol(base), "5m", since_iso, None)
-            if len(df) < BB_LENGTH + 1:
+            if len(df) < BB_LENGTH + TREND_SMA_LENGTH + 1:
                 continue
-            
+
             # pandas-ta 지표 계산
             df["rsi"] = ta.rsi(df["Close"], length=RSI_PERIOD)
+            df["trend_sma"] = ta.sma(df["Close"], length=TREND_SMA_LENGTH)
             bbands = ta.bbands(df["Close"], length=BB_LENGTH, std=BB_STD)
             df = pd.concat([df, bbands], axis=1)
-            
+
             # 마지막 확정된 캔들(이전 캔들)과 현재 캔들 확인
             last = df.iloc[-2]
             curr = df.iloc[-1]
@@ -78,9 +87,9 @@ def _get_signals() -> dict[str, str]:
             # 하드코딩하면 KeyError로 매 사이클 죽는다 — 접두어로 찾는다.
             lower_band = last[next(c for c in bbands.columns if c.startswith("BBL_"))]
             mid_band = last[next(c for c in bbands.columns if c.startswith("BBM_"))]
-            
-            # 진입 로직: 종가가 볼린저 밴드 하단 터치 & RSI 과매도
-            if curr["Close"] < lower_band and curr["rsi"] < RSI_BUY_THRESHOLD:
+
+            # 진입 로직: 장기추세(SMA100) 위 + 볼린저 밴드 하단 터치 + RSI 과매도
+            if curr["Close"] > curr["trend_sma"] and curr["Close"] < lower_band and curr["rsi"] < RSI_BUY_THRESHOLD:
                 signals[base] = "buy"
             # 청산 로직: 종가가 중앙선 회복 또는 RSI 과매수
             elif curr["Close"] > mid_band or curr["rsi"] > RSI_SELL_THRESHOLD:
@@ -109,29 +118,35 @@ def run_cycle() -> None:
         return
 
     signals = _get_signals()
-    
+    cooldown_until = state.setdefault("cooldown_until", {})
+
     # 1. 청산 (Sell) 로직 처리
     for base, pos in list(state["positions"].items()):
         current_price = prices.get(base)
         if not current_price:
             continue
-            
+
         pnl = pos["notional_usdt"] * (current_price / pos["entry_price"] - 1)
-        
+        is_stop_loss = pnl < -pos["notional_usdt"] * 0.05  # 5% 손절 라인
+
         # 수익 실현 또는 손절 시그널 발생 시
-        if signals.get(base) == "sell" or pnl < -pos["notional_usdt"] * 0.05: # 5% 손절 라인
+        if signals.get(base) == "sell" or is_stop_loss:
             print(f"[{now_iso()}] 🔴 청산: {base} @ {current_price:.4f} (손익: {pnl:+.2f} USDT)")
             state["cumulative_realized_pnl_usdt"] += pnl
             state["equity_usdt"] += pos["notional_usdt"] + pnl  # 진입 때 뺐던 원금 반환 + 손익
             del state["positions"][base]
+            if is_stop_loss:
+                cooldown_until[base] = (datetime.now(timezone.utc) + timedelta(hours=COOLDOWN_HOURS)).isoformat()
 
     # 2. 진입 (Buy) 로직 처리
+    now = datetime.now(timezone.utc)
     for base, signal in signals.items():
-        if signal == "buy" and base not in state["positions"]:
+        in_cooldown = base in cooldown_until and now < datetime.fromisoformat(cooldown_until[base])
+        if signal == "buy" and base not in state["positions"] and not in_cooldown:
             current_price = prices.get(base)
             if not current_price:
                 continue
-                
+
             invest_amount = START_CAPITAL_USDT * POSITION_SIZE_PCT
             if state["equity_usdt"] >= invest_amount: # 잔고 확인
                 print(f"[{now_iso()}] 🟢 진입: {base} @ {current_price:.4f} (투자금: {invest_amount:.2f} USDT)")

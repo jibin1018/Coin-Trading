@@ -3,6 +3,11 @@
 전날의 데이터를 바탕으로 박스권(Range)을 만들고,
 오늘 가격이 그 범위를 돌파(Breakout)하면 강한 추세가 시작된 것으로 판단하여
 과감하게 추세를 따라가는 기관급 돌파 매매 전략입니다.
+
+원래는 하단 돌파 시 숏으로 반전(stop-and-reverse)했는데, 백테스트(app/dual_thrust_backtest.py)
+결과 코인 시장의 구조적 상승 구간에서 숏 레그가 수익을 계속 깎아먹는 것으로 확인돼
+(개선 전 평균 +112.78%/MDD 39~70% → 숏 제거 후 +168.53%/MDD 22~38%) 숏 레그를 빼고
+롱온리+관망으로 바꿨다.
 """
 from __future__ import annotations
 
@@ -79,46 +84,28 @@ def run_cycle() -> None:
         current_prices[base] = current_price
         pos = state["positions"].get(base)
         
-        # 1. 청산 및 스위칭 로직
+        # 1. 청산 로직 — 하단 돌파 시 숏으로 반전하지 않고 관망으로 전환
         if pos:
-            direction = 1 if pos["side"] == "long" else -1
-            pnl = pos["notional_usdt"] * direction * (current_price / pos["entry_price"] - 1)
-            
-            # 롱인데 하단 돌파하면 손절(청산) 및 숏 스위칭 대기
-            if pos["side"] == "long" and current_price < sell_line:
+            pnl = pos["notional_usdt"] * (current_price / pos["entry_price"] - 1)
+            if current_price < sell_line:
                 print(f"[{now_iso()}] 🔴 롱 청산 (하단 붕괴): {base} (손익: {pnl:+.2f})")
                 state["cumulative_realized_pnl_usdt"] += pnl
                 state["equity_usdt"] += pos["notional_usdt"] + pnl  # 진입 때 뺐던 원금 반환 + 손익
                 del state["positions"][base]
 
-            # 숏인데 상단 돌파하면 손절(청산) 및 롱 스위칭 대기
-            elif pos["side"] == "short" and current_price > buy_line:
-                print(f"[{now_iso()}] 🔴 숏 청산 (상단 돌파): {base} (손익: {pnl:+.2f})")
-                state["cumulative_realized_pnl_usdt"] += pnl
-                state["equity_usdt"] += pos["notional_usdt"] + pnl
-                del state["positions"][base]
-
-        # 2. 진입 로직
+        # 2. 진입 로직 — 상단선(Buy Line) 돌파 시에만 Long 진입(숏 없음)
         if base not in state["positions"]:
             invest_amount = START_CAPITAL_USDT * POSITION_SIZE_PCT
-            if state["equity_usdt"] >= invest_amount:
-                # 상단선(Buy Line) 돌파 시 Long 진입
-                if current_price > buy_line:
-                    print(f"[{now_iso()}] 🟢 상단 돌파 롱 진입: {base} @ {current_price:.2f} (상단: {buy_line:.2f})")
-                    state["positions"][base] = {"side": "long", "entry_price": current_price, "notional_usdt": invest_amount}
-                    state["equity_usdt"] -= invest_amount
-                # 하단선(Sell Line) 붕괴 시 Short 진입
-                elif current_price < sell_line:
-                    print(f"[{now_iso()}] 🔴 하단 붕괴 숏 진입: {base} @ {current_price:.2f} (하단: {sell_line:.2f})")
-                    state["positions"][base] = {"side": "short", "entry_price": current_price, "notional_usdt": invest_amount}
-                    state["equity_usdt"] -= invest_amount
+            if state["equity_usdt"] >= invest_amount and current_price > buy_line:
+                print(f"[{now_iso()}] 🟢 상단 돌파 롱 진입: {base} @ {current_price:.2f} (상단: {buy_line:.2f})")
+                state["positions"][base] = {"side": "long", "entry_price": current_price, "notional_usdt": invest_amount}
+                state["equity_usdt"] -= invest_amount
 
     # 미실현 손익 업데이트
     unrealized_pnl = 0
     for base, pos in state["positions"].items():
         if current_prices.get(base):
-            direction = 1 if pos["side"] == "long" else -1
-            pnl = pos["notional_usdt"] * direction * (current_prices[base] / pos["entry_price"] - 1)
+            pnl = pos["notional_usdt"] * (current_prices[base] / pos["entry_price"] - 1)
             pos["unrealized_pnl_usdt"] = pnl
             unrealized_pnl += pnl
 

@@ -5,3 +5,4 @@ requests==2.32.3
 websockets==13.1
 scikit-learn==1.5.2
 yfinance==1.7.0
+statsmodels==0.15.0

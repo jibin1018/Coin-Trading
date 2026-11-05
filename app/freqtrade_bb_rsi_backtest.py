@@ -1,7 +1,13 @@
 """볼린저밴드+RSI 역추세(app/freqtrade_paper_loop.py) 백테스트.
 
-페이퍼봇과 동일한 규칙: 종가가 BB(20,2) 하단 아래이고 RSI(14)<30이면 롱 진입,
-BB 중단(SMA20) 회복 또는 RSI>70이면 청산, 그 외 -5% 강제손절. 5분봉 기준.
+페이퍼봇과 동일한 규칙: 종가가 SMA(100) 위에 있고(추세 필터) BB(20,2) 하단 아래이면서
+RSI(14)<30이면 롱 진입, BB 중단(SMA20) 회복 또는 RSI>70이면 청산, 그 외 -5% 강제손절.
+손절 이후 같은 심볼은 COOLDOWN_BARS 동안 재진입하지 않는다. 5분봉 기준.
+
+추세 필터 + 쿨다운을 추가한 이유: 원래는 추세 필터가 없어서 하락장에서도 "하단밴드+RSI
+과매도"면 무조건 매수했다 — 계속 떨어지는 칼날을 받다가 손절, 재진입, 또 손절이 반복되며
+3개월 백테스트에서 평균 -8.60%(매수보유 대비 -33.23%p) 순손실을 냈다. 평균회귀 전략은
+범위장/상승장에서만 유효하다는 원칙을 적용해 하락 추세에서의 진입을 차단했다.
 
 주의: 선물 가격만 재현하고 펀딩비는 미반영(app/futures_data.py 참고).
 """
@@ -21,6 +27,8 @@ RSI_BUY_THRESHOLD = 30
 RSI_SELL_THRESHOLD = 70
 BB_LENGTH = 20
 BB_STD = 2.0
+TREND_SMA_LENGTH = 100
+COOLDOWN_BARS = 12  # 5분봉 기준 1시간 — 손절 후 바로 같은 자리에서 다시 긁히는 걸 막음
 POSITION_SIZE_PCT = 0.2
 FEE_PCT = 0.05
 
@@ -31,24 +39,25 @@ def _perp_symbol(base: str) -> str:
 
 def _simulate(symbol: str, since: str, until: str | None, start_capital: float) -> dict:
     df = fetch_perp_ohlcv(symbol, "5m", since, until)
-    if len(df) < BB_LENGTH + RSI_PERIOD:
+    if len(df) < BB_LENGTH + RSI_PERIOD + TREND_SMA_LENGTH:
         return {"symbol": symbol, "trades": 0, "return_pct": 0.0, "max_dd_pct": 0.0}
 
     df["rsi"] = ta.rsi(df["Close"], length=RSI_PERIOD)
+    df["trend_sma"] = ta.sma(df["Close"], length=TREND_SMA_LENGTH)
     bbands = ta.bbands(df["Close"], length=BB_LENGTH, std=BB_STD)
     df = pd.concat([df, bbands], axis=1).dropna()
     # pandas-ta 버전에 따라 컬럼명이 BBL_20_2.0 이거나 BBL_20_2.0_2.0 이거나 달라서 접두어로 찾는다
-    # (app/freqtrade_paper_loop.py 는 이름을 하드코딩해서 실제로는 KeyError로 매 사이클 죽는 상태 — 별도 확인 필요)
     lower_col = next(c for c in bbands.columns if c.startswith("BBL_"))
     mid_col = next(c for c in bbands.columns if c.startswith("BBM_"))
 
     budget = start_capital * POSITION_SIZE_PCT
     cash = budget
     entry_price: float | None = None
+    cooldown_until: int = -1
     equity_curve = []
     n_trades = 0
 
-    for _, row in df.iterrows():
+    for i, (_, row) in enumerate(df.iterrows()):
         price = row["Close"]
 
         if entry_price is not None:
@@ -59,8 +68,13 @@ def _simulate(symbol: str, since: str, until: str | None, start_capital: float) 
                 cash += pnl
                 n_trades += 1
                 entry_price = None
+                if pnl_pct < -0.05:
+                    cooldown_until = i + COOLDOWN_BARS
 
-        if entry_price is None and price < row[lower_col] and row["rsi"] < RSI_BUY_THRESHOLD:
+        if (
+            entry_price is None and i >= cooldown_until
+            and price > row["trend_sma"] and price < row[lower_col] and row["rsi"] < RSI_BUY_THRESHOLD
+        ):
             entry_price = price
             cash -= budget * FEE_PCT / 100
 

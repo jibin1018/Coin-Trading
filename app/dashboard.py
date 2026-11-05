@@ -37,6 +37,11 @@ BOTS_CONFIG = {
             "한국 주식 AI 하이브리드": {"file": "kr_hybrid_state.json", "script": "kr_hybrid_paper_loop", "flag": "🇰🇷"},
             "Dual Thrust (yfinance 페이퍼, KIS 키 불필요)": {"file": "kr_dual_thrust_paper_state.json", "script": "kr_dual_thrust_paper_loop", "flag": "🇰🇷"},
             "Dual Thrust (KIS 모의투자 실연동)": {"file": "kr_dual_thrust_state.json", "script": "kr_dual_thrust_kis_loop", "flag": "🇰🇷"},
+            # Top-N 상대모멘텀 로테이션 — yfinance 백테스트로 검증(KR alpha +25.7%p, US alpha +37.9%p
+            # vs 등가중 매수보유, app/kr_us_rotation_backtest.py). KIS 모의투자 키가 있어야 실제로
+            # 가동되므로(issue_token 필요) 키 생기기 전까진 Offline으로만 뜬다.
+            "Top-N 모멘텀 로테이션 국장 (KIS 모의투자 필요)": {"file": "stock_rotation_kr_state.json", "script": "stock_rotation_kr_loop", "flag": "🇰🇷"},
+            "Top-N 모멘텀 로테이션 미장 (KIS 모의투자 필요)": {"file": "stock_rotation_us_state.json", "script": "stock_rotation_us_loop", "flag": "🇺🇸"},
         }
     }
 }
@@ -68,6 +73,8 @@ INITIAL_CAPITAL_BY_FILE = {
     "kr_dual_thrust_state.json": 1000000.0,  # 100만원 (KIS 실연동, app/kr_dual_thrust_kis_loop.py 예산과 맞춤)
     "kr_dual_thrust_paper_state.json": 1000000.0,  # 100만원 (yfinance 페이퍼 버전, 위와 동일 예산)
     "upbit_paper_state.json": 100000.0,  # 10만원 (app/upbit_paper_loop.py 예산과 맞춤)
+    "stock_rotation_kr_state.json": 5000000.0,  # 500만원 (app/kr_watchlist.CAPITAL_BUDGET_KRW와 동일)
+    "stock_rotation_us_state.json": 3571.43,  # ≈500만원/1400원 (app/us_watchlist.CAPITAL_BUDGET_USD와 동일)
 }
 DEFAULT_INITIAL_CAPITAL = 70.0  # ≈10만원, 나머지 신규 페이퍼봇 공통
 
@@ -79,6 +86,7 @@ CURRENCY_BY_FILE = {
     "kr_dual_thrust_paper_state.json": "KRW",
     "upbit_paper_state.json": "KRW",
     "stock_hybrid_state.json": "USD",
+    "stock_rotation_kr_state.json": "KRW",
 }
 DEFAULT_CURRENCY = "USD"
 
@@ -86,7 +94,11 @@ DEFAULT_CURRENCY = "USD"
 # 포지션 가치를 더해줘야 하는데, momentum_rotation_loop.py(기존 원본 봇)는 리밸런스마다
 # equity_usdt 자체를 총자산(NAV)으로 다시 계산해서 넣는다 — 포지션 notional이 이미 그 안에
 # 포함돼있어서, 여기에 포지션 가치를 또 더하면 2배로 뻥튀기된다(실측: $19,992 = $9,996 × 2).
-EQUITY_ALREADY_INCLUDES_POSITIONS = {"momentum_state.json"}
+# stock_rotation_*_loop.py도 같은 이유 — KIS 잔고조회가 진실 소스라 실제 보유종목을 dashboard가
+# 아는 "positions" 딕셔너리로 안 남기고, equity_history의 마지막 값이 이미 총자산이다.
+EQUITY_ALREADY_INCLUDES_POSITIONS = {
+    "momentum_state.json", "stock_rotation_kr_state.json", "stock_rotation_us_state.json",
+}
 
 # script_name -> bot_info({file, script}) 역참조. 개별 봇 시작/정지 API에서 파일명을 찾는 데 쓴다.
 ALL_BOTS_BY_SCRIPT = {
@@ -196,7 +208,11 @@ def get_bot_status(filename: str, script_name: str) -> dict:
         initial_capital = INITIAL_CAPITAL_BY_FILE.get(filename, DEFAULT_INITIAL_CAPITAL)
 
 
-        equity = data.get("equity_usdt", data.get("equity_usd", data.get("equity_krw", initial_capital)))
+        # stock_rotation_*_loop.py는 top-level equity_* 키가 없다(KIS 잔고조회가 진실 소스라
+        # 전략 메타데이터만 저장) — 그런 경우 equity_history의 마지막 값으로 대체한다.
+        history_raw = data.get("equity_history", [])
+        fallback_equity = history_raw[-1].get("equity", initial_capital) if history_raw else initial_capital
+        equity = data.get("equity_usdt", data.get("equity_usd", data.get("equity_krw", fallback_equity)))
         if filename in EQUITY_ALREADY_INCLUDES_POSITIONS:
             total_equity = equity
         else:

@@ -20,6 +20,7 @@ import os
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 from app.kis_auth import issue_token
 from app.kis_ohlcv_cache import warm_cache
@@ -43,10 +44,41 @@ def _universe() -> list[tuple]:
     return [("US", sym, excd) for sym, excd, _ in STOCK_UNIVERSE]
 
 
+def _load_closes_yf() -> pd.DataFrame:
+    """HANTOO_TEST_KEY가 없을 때 쓰는 대체 경로 — KIS 캐시 대신 yfinance 공개 시세로
+    같은 모양(날짜 x 종목, Close가)의 DataFrame을 만든다. KR은 6자리 코드에 .KS를
+    먼저 시도하고 데이터가 없으면 .KQ(코스닥)로 재시도한다."""
+    if MARKET == "KR":
+        from app.ema_cross_watchlist import STOCK_UNIVERSE
+        tickers, suffixes = [code for code, _ in STOCK_UNIVERSE], (".KS", ".KQ")
+    else:
+        from app.us_swing_search import STOCK_UNIVERSE
+        tickers, suffixes = [sym for sym, _, _ in STOCK_UNIVERSE], ("",)
+
+    series: dict[str, pd.Series] = {}
+    for ticker in tickers:
+        for suffix in suffixes:
+            try:
+                hist = yf.Ticker(f"{ticker}{suffix}").history(start=SINCE, end=UNTIL, auto_adjust=True)
+            except Exception as exc:
+                print(f"  {ticker}{suffix}: 조회 실패 ({exc})")
+                continue
+            if not hist.empty:
+                series[ticker] = hist["Close"].tz_localize(None)
+                break
+        else:
+            print(f"  {ticker}: 데이터 없음 (시도: {[s or 'KIS기본' for s in suffixes]})")
+    return pd.DataFrame(series).sort_index()
+
+
 def _load_closes() -> pd.DataFrame:
-    token = issue_token()
-    frames = warm_cache(_universe(), token, SINCE, UNTIL)
-    closes = pd.DataFrame({s: f["Close"] for s, f in frames.items()}).sort_index()
+    if os.environ.get("HANTOO_TEST_KEY"):
+        token = issue_token()
+        frames = warm_cache(_universe(), token, SINCE, UNTIL)
+        closes = pd.DataFrame({s: f["Close"] for s, f in frames.items()}).sort_index()
+    else:
+        print("[안내] HANTOO_TEST_KEY가 없어 KIS 대신 yfinance 공개 시세로 대체 수집합니다.")
+        closes = _load_closes_yf()
     # 거래일 기준 정렬 — 최소 60% 종목이 값 있는 날만
     closes = closes[closes.notna().mean(axis=1) >= 0.6]
     return closes

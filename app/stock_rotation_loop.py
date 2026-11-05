@@ -36,6 +36,11 @@ from app.stock_rotation_state import load_state, log_event, now_iso, save_state
 MARKET = os.environ.get("ROTATION_MARKET", "KR").upper()
 TOP_K = int(os.environ.get("ROTATION_TOP_K", "8"))
 REGIME = os.environ.get("ROTATION_REGIME", "ew_sma200")
+# app/kr_us_rotation_backtest.py에서 검증 — 리밸런스 주기와 무관한 일일 손절(원래는 포지션이
+# 다음 리밸런스까지 무방비로 노출돼 MDD를 키우는 주범이었음)과, 순위 버퍼(top_n 밖으로 살짝
+# 밀렸다고 바로 안 파는 히스테리시스로 회전율 감소 — 국장 기준 연회전율 35배→8배로 줄었음.
+STOP_LOSS_PCT = float(os.environ.get("ROTATION_STOP_LOSS_PCT", "0.15"))
+RANK_BUFFER = int(os.environ.get("ROTATION_RANK_BUFFER", "2"))
 LOOP_SLEEP_SECONDS = int(os.environ.get("ROTATION_LOOP_SLEEP_SECONDS", "60"))
 TOKEN_TTL_SECONDS = 12 * 3600
 HISTORY_SINCE = "2018-01-01"
@@ -224,8 +229,9 @@ def _load_closes(token: str) -> pd.DataFrame:
     return closes[closes.notna().mean(axis=1) >= 0.6]
 
 
-def _target_basket(closes: pd.DataFrame) -> tuple[list[str], bool]:
-    """반환: (상위 K 종목, 레짐이 전액현금인지)."""
+def _target_basket(closes: pd.DataFrame, held: set[str] | None = None) -> tuple[list[str], bool]:
+    """반환: (상위 K 종목, 레짐이 전액현금인지). held가 주어지면 순위 버퍼(top_n+RANK_BUFFER
+    안이면 유지)를 적용해 노이즈성 회전을 줄인다."""
     if len(closes) < max(LOOKBACK + 1, 200):
         return [], False
     rets = closes.pct_change()
@@ -238,7 +244,13 @@ def _target_basket(closes: pd.DataFrame) -> tuple[list[str], bool]:
     mom = mom[closes.iloc[-1].notna()]
     if len(mom) < TOP_K:
         return [], False
-    return list(mom.sort_values(ascending=False).index[:TOP_K]), False
+    ranked = list(mom.sort_values(ascending=False).index)
+    if not held:
+        return ranked[:TOP_K], False
+    buffer_zone = set(ranked[:TOP_K + RANK_BUFFER])
+    keep = [s for s in ranked if s in held and s in buffer_zone]
+    new_entries = [s for s in ranked if s not in keep][:max(TOP_K - len(keep), 0)]
+    return keep + new_entries, False
 
 
 def _market_today() -> dt.date:
@@ -263,12 +275,12 @@ def plan_rebalance(token: str, state: dict) -> None:
     if closes.empty:
         log_event(state, f"[{MARKET}] 시세 캐시 비어 계획 보류")
         return
-    target, regime_cash = _target_basket(closes)
+    held = set(_held(token))
+    target, regime_cash = _target_basket(closes, held)
     if not target and not regime_cash:
         log_event(state, f"[{MARKET}] 데이터 부족 — 계획 보류 ({closes.shape})")
         return
 
-    held = set(_held(token))
     tgt = set(target)
     state["pending_sells"] = sorted(held - tgt)
     state["pending_buys"] = [s for s in target if s not in held]
@@ -279,6 +291,20 @@ def plan_rebalance(token: str, state: dict) -> None:
     log_event(state, f"[{MARKET}] 계획 완료 — 목표 {target or '전액현금'} / "
                      f"매도 {state['pending_sells']} / 매수 {state['pending_buys']}")
     save_state(state)
+
+
+def check_stop_loss(state: dict, snap: dict) -> list[str]:
+    """보유 종목이 -STOP_LOSS_PCT 이상 빠지면 리밸런스 주기와 무관하게 즉시 매도 큐에
+    넣는다. 원래는 포지션이 다음 리밸런스까지(며칠~몇주) 무방비로 노출돼 있었다."""
+    pending_sells = set(state.get("pending_sells", []))
+    newly_stopped = [
+        symbol for symbol, pos in snap["positions"].items()
+        if pos["pnl_pct"] <= -STOP_LOSS_PCT * 100 and symbol not in pending_sells
+    ]
+    if newly_stopped:
+        state["pending_sells"] = sorted(pending_sells | set(newly_stopped))
+        log_event(state, f"[{MARKET}] 손절 트리거 — {newly_stopped} 즉시 매도 큐에 추가")
+    return newly_stopped
 
 
 def _record_equity(token: str, state: dict, snap: dict | None = None) -> None:
@@ -407,10 +433,12 @@ def main() -> None:
             if now.weekday() < 5:
                 if ORDER_WINDOW[0] <= now.time() <= ORDER_WINDOW[1]:
                     state = load_state()
+                    snap = broker_snapshot(token)
+                    check_stop_loss(state, snap)  # 리밸런스 큐와 무관하게 매 사이클 확인
                     if state.get("pending_sells") or state.get("pending_buys"):
                         consume_queue(token, state)
                     else:
-                        _record_equity(token, state)
+                        _record_equity(token, state, snap)
                         save_state(state)
                     last_snapshot = time.monotonic()
                 elif now.time() >= PLAN_AFTER:

@@ -35,6 +35,12 @@ REBALS = [5, 10, 20]
 TOP_NS = [3, 5, 8, 10]
 REGIMES = ["none", "ew_sma200"]
 
+# 국장 쪽이 연회전율 35배(상위 조합 기준)로 과매매에다 MDD도 39~63%로 컸다 — 리밸런스
+# 주기와 무관하게 매일 확인하는 손절(포지션이 다음 리밸런스까지 무방비였던 게 MDD 주범)과,
+# 순위 버퍼(상위N 밖으로 살짝 밀렸다고 바로 안 파는 히스테리시스로 회전율을 줄임)를 추가.
+STOP_LOSS_PCT = float(os.environ.get("ROTATION_STOP_LOSS_PCT", "0.15"))
+RANK_BUFFER = int(os.environ.get("ROTATION_RANK_BUFFER", "2"))
+
 
 def _universe() -> list[tuple]:
     if MARKET == "KR":
@@ -120,6 +126,7 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
     start = max(lookback + 1, 200)
     w = pd.Series(0.0, index=closes.columns)
     last_w = w.copy()
+    entry_price: dict[str, float] = {}
     daily = []
     idx = []
     turnovers = []
@@ -127,6 +134,22 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
     for i in range(start, len(dates)):
         d = dates[i]
         g = (w * rets.loc[d].fillna(0.0)).sum()
+
+        # 일일 손절 — 리밸런스 주기와 무관하게 매일 확인한다. 원래는 포지션이 다음
+        # 리밸런스까지 무방비로 노출돼 있어서(며칠~몇주) MDD를 키우는 주범이었다.
+        stopped = [
+            sym for sym in entry_price
+            if w.get(sym, 0.0) > 0 and pd.notna(closes.loc[d, sym])
+            and closes.loc[d, sym] <= entry_price[sym] * (1 - STOP_LOSS_PCT)
+        ]
+        if stopped:
+            for sym in stopped:
+                w[sym] = 0.0
+                del entry_price[sym]
+            turn = len(stopped) / top_n
+            turnovers.append(turn)
+            g -= turn * COST_PER_SIDE_PCT / 100
+
         daily.append(g)
         idx.append(d)
 
@@ -136,12 +159,25 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
             m = m[closes.loc[d].notna()]
             nw = pd.Series(0.0, index=closes.columns)
             if not cash and len(m) >= top_n:
-                winners = m.sort_values(ascending=False).index[:top_n]
-                nw[winners] = 1.0 / top_n
+                ranked = list(m.sort_values(ascending=False).index)
+                # 순위 버퍼(히스테리시스) — 기존 보유종목이 top_n 밖으로 살짝만 밀렸으면
+                # (top_n+RANK_BUFFER 안이면) 그대로 유지해서 노이즈성 회전을 줄인다.
+                buffer_zone = set(ranked[:top_n + RANK_BUFFER])
+                held = {s for s in w.index if w[s] > 0}
+                keep = held & buffer_zone
+                new_entries = [s for s in ranked if s not in keep][:max(top_n - len(keep), 0)]
+                selected = keep | set(new_entries)
+                if selected:
+                    nw[list(selected)] = 1.0 / len(selected)
             turn = (nw - last_w).abs().sum()
             turnovers.append(turn)
             # 비용은 다음 날 반영되도록 당일 수익에서 차감
             daily[-1] -= turn * COST_PER_SIDE_PCT / 100
+            for sym in nw.index:
+                if nw[sym] > 0 and sym not in entry_price:
+                    entry_price[sym] = closes.loc[d, sym]
+                elif nw[sym] == 0 and sym in entry_price:
+                    del entry_price[sym]
             w, last_w = nw, nw.copy()
 
     dseries = pd.Series(daily, index=idx)

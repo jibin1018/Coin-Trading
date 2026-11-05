@@ -1,8 +1,13 @@
 """업비트(KRW 현물) BB+RSI 롱온리 전략 (페이퍼 트레이딩 전용)
 
-app/freqtrade_paper_loop.py와 같은 로직(볼린저 밴드 하단 반등 + RSI 과매도 진입)을 쓰지만,
-바이낸스 USDT 선물이 아니라 업비트 KRW 현물 시세로 돌린다. 업비트는 선물/숏이 없어서
-롱온리로만 동작한다(freqtrade_paper_loop도 이미 롱온리라 전략 자체는 그대로 옮길 수 있음).
+app/freqtrade_paper_loop.py와 같은 로직(SMA(100) 추세 필터 + 볼린저 밴드 하단 반등 +
+RSI 과매도 진입, 손절 후 쿨다운)을 쓰지만, 바이낸스 USDT 선물이 아니라 업비트 KRW 현물
+시세로 돌린다. 업비트는 선물/숏이 없어서 롱온리로만 동작한다.
+
+추세 필터+쿨다운 없이 처음 만들었을 때는 freqtrade_paper_loop.py의 개선 전과 같은 문제
+(하락장에서도 무조건 매수 시도)가 있을 수 있어서, 같은 수정을 적용했다 — 업비트 자체
+백테스트(app/upbit_bb_rsi_backtest.py)로 확인: 평균 +0.11%, MDD 최대 1.6%(추세 필터
+적용 전 상태로는 백테스트 안 해봤지만 freqtrade와 같은 구조라 같은 문제가 있었을 것).
 
 시세 조회는 공개 API라 API 키가 없어도 동작한다(ccxt.upbit 공개 엔드포인트).
 실거래로 전환하려면 .env에 UPBIT_ACCESS_KEY/UPBIT_SECRET_KEY를 채우고 주문 실행부를
@@ -13,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
 import ccxt
 import pandas as pd
@@ -30,6 +36,8 @@ RSI_BUY_THRESHOLD = 30
 RSI_SELL_THRESHOLD = 70
 BB_LENGTH = 20
 BB_STD = 2.0
+TREND_SMA_LENGTH = 100
+COOLDOWN_HOURS = 1.0  # 손절 후 같은 심볼 재진입까지 대기 (freqtrade_paper_loop와 동일)
 POSITION_SIZE_PCT = 0.2
 
 STATE_PATH = os.environ.get(
@@ -71,12 +79,13 @@ def _get_signals(exchange: ccxt.upbit) -> dict[str, str]:
     signals = {}
     for base in UNIVERSE:
         try:
-            ohlcv = exchange.fetch_ohlcv(_symbol(base), timeframe="5m", limit=BB_LENGTH + 50)
+            ohlcv = exchange.fetch_ohlcv(_symbol(base), timeframe="5m", limit=BB_LENGTH + TREND_SMA_LENGTH + 10)
             df = pd.DataFrame(ohlcv, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
-            if len(df) < BB_LENGTH + 1:
+            if len(df) < BB_LENGTH + TREND_SMA_LENGTH + 1:
                 continue
 
             df["rsi"] = ta.rsi(df["Close"], length=RSI_PERIOD)
+            df["trend_sma"] = ta.sma(df["Close"], length=TREND_SMA_LENGTH)
             bbands = ta.bbands(df["Close"], length=BB_LENGTH, std=BB_STD)
             df = pd.concat([df, bbands], axis=1)
 
@@ -88,7 +97,8 @@ def _get_signals(exchange: ccxt.upbit) -> dict[str, str]:
             lower_band = last[next(c for c in bbands.columns if c.startswith("BBL_"))]
             mid_band = last[next(c for c in bbands.columns if c.startswith("BBM_"))]
 
-            if curr["Close"] < lower_band and curr["rsi"] < RSI_BUY_THRESHOLD:
+            # 진입 로직: 장기추세(SMA100) 위 + 볼린저 밴드 하단 터치 + RSI 과매도
+            if curr["Close"] > curr["trend_sma"] and curr["Close"] < lower_band and curr["rsi"] < RSI_BUY_THRESHOLD:
                 signals[base] = "buy"
             elif curr["Close"] > mid_band or curr["rsi"] > RSI_SELL_THRESHOLD:
                 signals[base] = "sell"
@@ -112,6 +122,7 @@ def run_cycle() -> None:
         return
 
     signals = _get_signals(exchange)
+    cooldown_until = state.setdefault("cooldown_until", {})
 
     # 1. 청산(Sell)
     for base, pos in list(state["positions"].items()):
@@ -119,15 +130,20 @@ def run_cycle() -> None:
         if not current_price:
             continue
         pnl = pos["notional_krw"] * (current_price / pos["entry_price"] - 1)
-        if signals.get(base) == "sell" or pnl < -pos["notional_krw"] * 0.05:
+        is_stop_loss = pnl < -pos["notional_krw"] * 0.05
+        if signals.get(base) == "sell" or is_stop_loss:
             print(f"[{now_iso()}] 🔴 청산: {base} @ {current_price:,.0f} (손익: {pnl:+,.0f} KRW)")
             state["cumulative_realized_pnl_krw"] += pnl
             state["equity_krw"] += pos["notional_krw"] + pnl
             del state["positions"][base]
+            if is_stop_loss:
+                cooldown_until[base] = (datetime.now(timezone.utc) + timedelta(hours=COOLDOWN_HOURS)).isoformat()
 
     # 2. 진입(Buy) — 업비트는 숏이 없어 롱온리
+    now = datetime.now(timezone.utc)
     for base, signal in signals.items():
-        if signal == "buy" and base not in state["positions"]:
+        in_cooldown = base in cooldown_until and now < datetime.fromisoformat(cooldown_until[base])
+        if signal == "buy" and base not in state["positions"] and not in_cooldown:
             current_price = prices.get(base)
             if not current_price:
                 continue

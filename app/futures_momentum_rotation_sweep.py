@@ -18,6 +18,10 @@ from app.futures_data import fetch_perp_ohlcv
 from app.futures_momentum_rotation_probe import UNIVERSE, SINCE, COMMISSION_PCT
 
 FUNDING_AWARE = os.environ.get("FUNDING_AWARE", "false").lower() == "true"
+# app/kr_us_rotation_backtest.py에서 검증된 계좌 전체 킬스위치(드로다운 임계값 넘으면
+# 전량청산+쿨다운)를 코인 쪽에도 테스트해볼 수 있게 옵션으로 추가. 0/미설정=꺼짐.
+KILL_DD = float(os.environ.get("KILL_DD", "0")) or None
+KILL_COOLDOWN_DAYS = int(os.environ.get("KILL_COOLDOWN_DAYS", "20"))
 
 
 def _fetch_closes() -> pd.DataFrame:
@@ -65,6 +69,7 @@ def simulate(
     max_dd = 0.0
     last_weights = weights.copy()
     n_rebal = 0
+    halted_until = -1
 
     for i in range(start_idx, len(dates)):
         date = dates[i]
@@ -77,6 +82,20 @@ def simulate(
         equity *= (1 + port_ret)
         peak = max(peak, equity)
         max_dd = max(max_dd, (peak - equity) / peak)
+
+        if KILL_DD is not None and halted_until < i:
+            dd = 1 - equity / peak
+            if dd >= KILL_DD:
+                if weights.abs().sum() > 0:
+                    turnover = weights.abs().sum()
+                    equity *= (1 - turnover * COMMISSION_PCT / 100)
+                weights = pd.Series(0.0, index=closes.columns)
+                last_weights = weights.copy()
+                halted_until = i + KILL_COOLDOWN_DAYS
+                peak = equity
+
+        if halted_until >= i:
+            continue  # 쿨다운 중엔 리밸런스도 건너뜀(전액 현금 유지)
 
         if (i - start_idx) % rebalance_every == 0:
             mom_today = momentum.loc[date].dropna()

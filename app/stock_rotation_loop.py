@@ -31,6 +31,7 @@ import pandas as pd
 
 from app.kis_auth import issue_token
 from app.kis_ohlcv_cache import cached_ohlcv
+from app.portfolio_guard import check_drawdown_kill
 from app.stock_rotation_state import load_state, log_event, now_iso, save_state
 
 MARKET = os.environ.get("ROTATION_MARKET", "KR").upper()
@@ -41,6 +42,12 @@ REGIME = os.environ.get("ROTATION_REGIME", "ew_sma200")
 # 밀렸다고 바로 안 파는 히스테리시스로 회전율 감소 — 국장 기준 연회전율 35배→8배로 줄었음.
 STOP_LOSS_PCT = float(os.environ.get("ROTATION_STOP_LOSS_PCT", "0.15"))
 RANK_BUFFER = int(os.environ.get("ROTATION_RANK_BUFFER", "2"))
+# 계좌 전체 킬스위치(app/portfolio_guard.py) — 워크포워드 검증에서 국장 OOS MDD가 58.9%까지
+# 튀었는데, 25% 드로다운에서 전량청산+20일 쿨다운을 걸면 CAGR은 유지되면서 MDD/Calmar가
+# 뚜렷하게 개선됨을 백테스트로 확인(kr_us_rotation_backtest.py의 ROTATION_KILL_DD 옵션).
+KILL_DD = float(os.environ.get("ROTATION_KILL_DD", "0.25"))
+RESET_HALT = os.environ.get("ROTATION_RESET_HALT", "false").lower() == "true"
+KILL_COOLDOWN_DAYS = int(os.environ.get("ROTATION_KILL_COOLDOWN_DAYS", "20"))
 LOOP_SLEEP_SECONDS = int(os.environ.get("ROTATION_LOOP_SLEEP_SECONDS", "60"))
 TOKEN_TTL_SECONDS = 12 * 3600
 HISTORY_SINCE = "2018-01-01"
@@ -307,6 +314,44 @@ def check_stop_loss(state: dict, snap: dict) -> list[str]:
     return newly_stopped
 
 
+def check_kill_switch(state: dict, snap: dict) -> bool:
+    """계좌 전체 드로다운이 KILL_DD를 넘으면 전량 청산하고 KILL_COOLDOWN_DAYS 동안 재진입을
+    금지한다(app/portfolio_guard.py 재사용, app/trx_swing_trade.py와 같은 패턴). 반환값이
+    True면 호출부는 리밸런스 계획을 건너뛰어야 한다(청산 큐 소비는 계속 진행).
+
+    app/kr_us_rotation_backtest.py의 ROTATION_KILL_DD 백테스트로 검증: 국장 OOS 기준
+    MDD 58.9%->31.3%, Calmar 0.96->2.54로 개선 확인."""
+    today = _market_today()
+
+    if RESET_HALT and state.get("halted"):
+        state["halted"] = False
+        state["halted_until_date"] = None
+        state["hwm"] = state.get("equity")
+        log_event(state, f"[{MARKET}] halt 수동 해제 — hwm 재설정")
+
+    if state.get("halted"):
+        until = state.get("halted_until_date")
+        if until and today >= dt.date.fromisoformat(until):
+            state["halted"] = False
+            state["halted_until_date"] = None
+            state["hwm"] = state.get("equity")
+            log_event(state, f"[{MARKET}] 킬스위치 쿨다운 종료 — 재진입 허용")
+        else:
+            return True
+
+    guard = check_drawdown_kill(state, state.get("equity", 0.0), KILL_DD, hwm_key="hwm")
+    if guard["kill"]:
+        held = set(snap["held"])
+        state["pending_sells"] = sorted(set(state.get("pending_sells", [])) | held)
+        state["pending_buys"] = []
+        state["halted"] = True
+        state["halted_until_date"] = (today + dt.timedelta(days=KILL_COOLDOWN_DAYS)).isoformat()
+        log_event(state, f"[{MARKET}] 🛑 킬스위치 발동 — 드로다운 {guard['dd']*100:.1f}% >= "
+                         f"{KILL_DD*100:.0f}%. 전량청산 후 {KILL_COOLDOWN_DAYS}일 재진입 금지.")
+        return True
+    return False
+
+
 def _record_equity(token: str, state: dict, snap: dict | None = None) -> None:
     """잔고 API 스냅샷을 그대로 state["broker"]에 박고, 평가·손익도 API 제공값을 쓴다."""
     if snap is None:
@@ -440,12 +485,21 @@ def main() -> None:
                     else:
                         _record_equity(token, state, snap)
                         save_state(state)
+                    # equity가 막 갱신됐으니(_record_equity) 바로 킬스위치 확인 — 발동하면
+                    # 전량청산을 pending_sells에 넣어주고, 다음 소비 사이클에 바로 처리되게 저장.
+                    state = load_state()
+                    if check_kill_switch(state, snap):
+                        save_state(state)
                     last_snapshot = time.monotonic()
                 elif now.time() >= PLAN_AFTER:
                     state = load_state()
-                    plan_rebalance(token, state)
-                    state = load_state()
-                    _record_equity(token, state)
+                    snap = broker_snapshot(token)
+                    _record_equity(token, state, snap)
+                    if not check_kill_switch(state, snap):
+                        save_state(state)
+                        plan_rebalance(token, state)
+                        state = load_state()
+                        _record_equity(token, state)
                     save_state(state)
                     last_snapshot = time.monotonic()
 

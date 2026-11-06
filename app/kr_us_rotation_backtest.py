@@ -41,6 +41,15 @@ REGIMES = ["none", "ew_sma200"]
 STOP_LOSS_PCT = float(os.environ.get("ROTATION_STOP_LOSS_PCT", "0.15"))
 RANK_BUFFER = int(os.environ.get("ROTATION_RANK_BUFFER", "2"))
 
+# 워크포워드 검증에서 국장 OOS MDD가 58.9%(IS 27.5%)로 튄 걸 보고 손실 최소화 추가 검토.
+# app/portfolio_guard.py의 계좌 전체 킬스위치 개념(종목별 손절과 별개로 전체 드로다운이
+# 임계값을 넘으면 전량 청산+정지)과, 등가중 대신 변동성이 큰 종목 비중을 줄이는 인버스
+# 변동성 가중을 둘 다 옵션으로 추가 — 기본값은 꺼짐(이전 결과와 비교 가능하게).
+PORTFOLIO_KILL_DD = float(os.environ.get("ROTATION_KILL_DD", "0")) or None  # 0/미설정=꺼짐
+KILL_COOLDOWN_DAYS = int(os.environ.get("ROTATION_KILL_COOLDOWN_DAYS", "20"))
+VOL_WEIGHTED = os.environ.get("ROTATION_VOL_WEIGHTED", "false").lower() == "true"
+VOL_LOOKBACK = int(os.environ.get("ROTATION_VOL_LOOKBACK", "20"))
+
 
 def _universe() -> list[tuple]:
     if MARKET == "KR":
@@ -123,6 +132,7 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
     검증용."""
     rets = closes.pct_change()
     mom = closes.pct_change(lookback)
+    vol = rets.rolling(VOL_LOOKBACK).std()
     ew_index = (1 + rets.mean(axis=1).fillna(0.0)).cumprod()
     ew_sma = ew_index.rolling(200).mean()
 
@@ -134,6 +144,10 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
     daily = []
     idx = []
     turnovers = []
+
+    equity = 1.0
+    peak = 1.0
+    halted_until = -1
 
     for i in range(start, len(dates)):
         d = dates[i]
@@ -154,8 +168,33 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
             turnovers.append(turn)
             g -= turn * COST_PER_SIDE_PCT / 100
 
+        equity *= (1 + g)
+        peak = max(peak, equity)
+
+        # 계좌 전체 킬스위치(app/portfolio_guard.py와 같은 개념) — 종목별 손절과 별개로,
+        # 전체 드로다운이 임계값을 넘으면 전량 청산하고 일정 기간 재진입을 금지한다.
+        # 쿨다운 동안은 현금이라 equity가 그대로라 peak를 트리거 시점으로 리셋해둔다
+        # (그래야 "회복"을 현금 상태에서 기다리는 데드락이 안 생긴다).
+        if PORTFOLIO_KILL_DD is not None and halted_until < i:
+            dd = 1 - equity / peak
+            if dd >= PORTFOLIO_KILL_DD:
+                turn = w.abs().sum()
+                if turn > 0:
+                    cost = turn * COST_PER_SIDE_PCT / 100
+                    g -= cost
+                    equity *= (1 - cost)
+                    turnovers.append(turn)
+                w = pd.Series(0.0, index=closes.columns)
+                last_w = w.copy()
+                entry_price.clear()
+                halted_until = i + KILL_COOLDOWN_DAYS
+                peak = equity
+
         daily.append(g)
         idx.append(d)
+
+        if halted_until >= i:
+            continue  # 쿨다운 중엔 리밸런스도 건너뜀(현금 유지)
 
         if (i - start) % rebal == 0:
             cash = regime == "ew_sma200" and ew_index.iloc[i] < ew_sma.iloc[i]
@@ -172,7 +211,17 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
                 new_entries = [s for s in ranked if s not in keep][:max(top_n - len(keep), 0)]
                 selected = keep | set(new_entries)
                 if selected:
-                    nw[list(selected)] = 1.0 / len(selected)
+                    if VOL_WEIGHTED:
+                        # 변동성이 큰 종목 비중을 줄인다(역변동성 가중) — 등가중이면
+                        # 가장 출렁이는 종목이 드로다운을 불균형하게 키운다.
+                        sel_vol = vol.loc[d, list(selected)].replace(0, np.nan)
+                        inv_vol = (1.0 / sel_vol).fillna(0.0)
+                        if inv_vol.sum() > 0:
+                            nw[inv_vol.index] = inv_vol / inv_vol.sum()
+                        else:
+                            nw[list(selected)] = 1.0 / len(selected)
+                    else:
+                        nw[list(selected)] = 1.0 / len(selected)
             turn = (nw - last_w).abs().sum()
             turnovers.append(turn)
             # 비용은 다음 날 반영되도록 당일 수익에서 차감

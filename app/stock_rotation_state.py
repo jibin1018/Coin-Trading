@@ -26,6 +26,10 @@ _DEFAULT_STATE = {
     "regime_cash": False,        # 최근 계획에서 레짐필터가 전액현금을 지시했는지
     "trade_log": [],
     "equity_history": [],        # [{ts, total_pnl, equity}]
+    "hwm": None,                 # 킬스위치용 고점 추적 (app/portfolio_guard.py)
+    "drawdown": 0.0,
+    "halted": False,
+    "halted_until_date": None,   # 킬스위치 발동 후 재진입 금지 마지막 날 "YYYY-MM-DD"
     "position_history": {},      # {symbol: [{ts, price, unrealized_pnl}]}
 }
 

@@ -223,8 +223,12 @@ def run() -> None:
     print(f"\n최고 Calmar: 룩백{best['lb']}/리밸{best['rb']}/top{best['tn']}/{best['rg']} "
           f"CAGR {best['cagr']:+.1f}% vs B&H {bh['cagr']:+.1f}% (알파 {best['alpha']:+.1f}%), "
           f"MDD {best['mdd']:.1f}% vs {bh['mdd']:.1f}%")
+    # yfinance 경로는 auto_adjust=True라 배당이 과거 종가에 이미 역산 반영돼 있다(배당 재투자
+    # 기준 조정종가) — KIS 경로(fetch_ohlcv_kis)는 원종가라 배당 미반영. 데이터소스에 따라
+    # 캐비어를 다르게 출력한다.
+    dividend_note = "배당 재투자 반영(조정종가)" if not os.environ.get("HANTOO_TEST_KEY") else "배당 미반영"
     print(f"\n비용가정: 편도 {COST_PER_SIDE_PCT}% (수수료+세금+슬리피지). "
-          f"배당 미반영, 생존편향 있음(현재 유니버스 고정).")
+          f"{dividend_note}, 생존편향 있음(현재 유니버스 고정).")
 
 
 if __name__ == "__main__":

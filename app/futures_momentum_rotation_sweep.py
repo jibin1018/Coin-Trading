@@ -1,12 +1,23 @@
 """모멘텀 로테이션 파라미터 강건성 체크 — 특정 파라미터 하나에 우연히 맞은 결과가 아닌지
 lookback/리밸런스주기/롱숏개수를 조금씩 바꿔가며 연환산·MDD가 일관되게 나오는지 확인.
+
+FUNDING_AWARE=true 로 돌리면 펀딩비(8시간마다 정산)도 반영한다 — README가 명시한 미해결
+문제("모멘텀 로테이션에 펀딩비 미반영")를 닫기 위함. 롱은 펀딩비가 양수일 때 지불하고
+숏은 받으므로(공식: 포지션당 손익 = -funding_rate * weight, weight는 롱+ 숏-로 부호가
+이미 들어있어 양쪽에 같은 식이 적용된다), 종목별 8시간 펀딩률을 하루 합으로 모아서 그날
+가중치에 곱해 equity에서 차감/가산한다.
 """
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 
+from app.funding_arb_backtest import fetch_funding_history
 from app.futures_data import fetch_perp_ohlcv
 from app.futures_momentum_rotation_probe import UNIVERSE, SINCE, COMMISSION_PCT
+
+FUNDING_AWARE = os.environ.get("FUNDING_AWARE", "false").lower() == "true"
 
 
 def _fetch_closes() -> pd.DataFrame:
@@ -22,7 +33,28 @@ def _fetch_closes() -> pd.DataFrame:
     return pd.DataFrame(series).sort_index()
 
 
-def simulate(closes: pd.DataFrame, lookback: int, rebalance_every: int, top_k: int) -> tuple[float, float, float, int]:
+def _fetch_funding_daily(dates: pd.DatetimeIndex) -> pd.DataFrame:
+    """종목별 8시간 펀딩률을 하루 합으로 묶어 closes와 같은 날짜 인덱스에 맞춘다."""
+    series = {}
+    for base in UNIVERSE:
+        try:
+            hist = fetch_funding_history(f"{base}/USDT:USDT", SINCE, None)
+        except Exception as exc:
+            print(f"  {base}: 펀딩비 조회 실패 ({exc})")
+            continue
+        if hist.empty:
+            continue
+        daily = hist["fundingRate"].resample("1D").sum()
+        daily.index = daily.index.tz_localize(None)
+        series[base] = daily
+    funding = pd.DataFrame(series).reindex(dates).fillna(0.0)
+    return funding
+
+
+def simulate(
+    closes: pd.DataFrame, lookback: int, rebalance_every: int, top_k: int,
+    funding: pd.DataFrame | None = None,
+) -> tuple[float, float, float, int]:
     returns = closes.pct_change()
     momentum = closes.pct_change(lookback)
     dates = closes.index
@@ -38,6 +70,10 @@ def simulate(closes: pd.DataFrame, lookback: int, rebalance_every: int, top_k: i
         date = dates[i]
         day_ret = returns.loc[date]
         port_ret = (weights * day_ret.fillna(0.0)).sum()
+        if funding is not None and date in funding.index:
+            # 롱(weight>0)은 펀딩률이 양수면 지불(-), 숏(weight<0)은 받음(+) — 부호가 이미
+            # weight에 들어있어 -funding_rate * weight 하나의 식으로 양쪽을 다 표현한다.
+            port_ret -= (weights * funding.loc[date].reindex(weights.index).fillna(0.0)).sum()
         equity *= (1 + port_ret)
         peak = max(peak, equity)
         max_dd = max(max_dd, (peak - equity) / peak)
@@ -68,12 +104,18 @@ def run() -> None:
     closes = _fetch_closes()
     print(f"{len(closes.columns)}개 종목, {len(closes)}행\n")
 
+    funding = None
+    if FUNDING_AWARE:
+        print("펀딩비 수집 중... (종목당 페이지네이션이라 시간이 좀 걸립니다)")
+        funding = _fetch_funding_daily(closes.index)
+        print(f"펀딩비 {funding.shape[1]}종목 수집 완료\n")
+
     print(f"{'lookback':>9}{'rebal':>7}{'top_k':>7}{'연환산':>9}{'MDD':>8}{'리밸런스':>9}")
     grid = []
     for lookback in [14, 30, 45, 60]:
         for rebalance in [3, 7, 14]:
             for top_k in [3, 5, 8]:
-                ann, mdd, years, n = simulate(closes, lookback, rebalance, top_k)
+                ann, mdd, years, n = simulate(closes, lookback, rebalance, top_k, funding)
                 grid.append((lookback, rebalance, top_k, ann, mdd, n))
                 print(f"{lookback:>9}{rebalance:>7}{top_k:>7}{ann:>8.2f}%{mdd:>7.1f}%{n:>9}")
 

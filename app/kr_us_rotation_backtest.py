@@ -116,7 +116,11 @@ def _ew_buy_hold(closes: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return eq, port_daily
 
 
-def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: str) -> dict:
+def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: str,
+          eval_start: "pd.Timestamp | None" = None) -> dict:
+    """eval_start가 주어지면 그 날짜 이전은 신호 생성용 웜업으로만 쓰고(계속 리밸런스는
+    돌아가되) 성과 지표는 eval_start 이후 구간만으로 계산한다 — 워크포워드(아웃오브샘플)
+    검증용."""
     rets = closes.pct_change()
     mom = closes.pct_change(lookback)
     ew_index = (1 + rets.mean(axis=1).fillna(0.0)).cumprod()
@@ -181,6 +185,8 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
             w, last_w = nw, nw.copy()
 
     dseries = pd.Series(daily, index=idx)
+    if eval_start is not None:
+        dseries = dseries[dseries.index >= eval_start]
     eq = (1 + dseries).cumprod()
     r = _metrics(eq, dseries)
     r["ann_turn"] = float(np.sum(turnovers)) / ((idx[-1] - idx[0]).days / 365.25)
@@ -231,5 +237,49 @@ def run() -> None:
           f"{dividend_note}, 생존편향 있음(현재 유니버스 고정).")
 
 
+def run_walkforward() -> None:
+    """IS(인샘플) 구간만으로 최고 Calmar 조합을 고른 다음, 그 조합을 OOS(아웃오브샘플,
+    인샘플 종료 이후) 구간에서만 평가한다 — 72조합 스윕으로 고른 "최고"가 전체 기간에
+    커브핏된 게 아닌지 확인하는 워크포워드 검증. README 미해결 문제 4번
+    ("마하세븐 포트폴리오는 워크포워드 검증 전")과 같은 우려가 Top-N 로테이션에도
+    적용될 수 있어 먼저 이걸로 검증한다."""
+    is_end = pd.Timestamp(os.environ.get("ROTATION_IS_END", "2022-12-31"))
+    print(f"[{MARKET}] 캐시 워밍/로드 (since {SINCE})...")
+    closes = _load_closes()
+    print(f"유효 {closes.shape[1]}종목, {closes.index[0].date()} ~ {closes.index[-1].date()}\n")
+
+    closes_is = closes[closes.index <= is_end]
+    print(f"인샘플(IS) 구간: {closes_is.index[0].date()} ~ {closes_is.index[-1].date()} "
+          f"({len(closes_is)}거래일) — 이 구간만 보고 최고 조합을 고른다.\n")
+
+    rows = []
+    for lb, rb, tn, rg in itertools.product(LOOKBACKS, REBALS, TOP_NS, REGIMES):
+        r = _sim(closes_is, lb, rb, tn, rg)
+        r.update(lb=lb, rb=rb, tn=tn, rg=rg)
+        rows.append(r)
+    rows.sort(key=lambda x: -x["calmar"])
+    best = rows[0]
+    print(f"IS 최고 Calmar: 룩백{best['lb']}/리밸{best['rb']}/top{best['tn']}/{best['rg']} "
+          f"— IS 성과 CAGR {best['cagr']:+.1f}%, MDD {best['mdd']:.1f}%, Calmar {best['calmar']:.2f}\n")
+
+    oos_start = is_end + pd.Timedelta(days=1)
+    oos_closes = closes[closes.index > is_end]
+    oos_r = _sim(closes, best["lb"], best["rb"], best["tn"], best["rg"], eval_start=oos_start)
+    bh_eq, bh_daily = _ew_buy_hold(oos_closes)
+    bh_oos = _metrics(bh_eq, bh_daily)
+
+    print(f"OOS 구간: {oos_start.date()} ~ {closes.index[-1].date()} ({len(oos_closes)}거래일)")
+    print(f"  전략(IS에서 고른 그 조합 그대로): CAGR {oos_r['cagr']:+.1f}%, MDD {oos_r['mdd']:.1f}%, "
+          f"Sharpe {oos_r['sharpe']:.2f}, Calmar {oos_r['calmar']:.2f}")
+    print(f"  벤치마크(OOS 구간 등가중 매수&보유): CAGR {bh_oos['cagr']:+.1f}%, MDD {bh_oos['mdd']:.1f}%, "
+          f"Sharpe {bh_oos['sharpe']:.2f}")
+    alpha_oos = oos_r["cagr"] - bh_oos["cagr"]
+    verdict = "B&H를 이김 — 커브핏 아닐 가능성 높음" if alpha_oos > 0 else "B&H에 못 미침 — 커브핏 의심, 주의 필요"
+    print(f"  OOS 알파: {alpha_oos:+.1f}%p -> {verdict}")
+
+
 if __name__ == "__main__":
-    run()
+    if os.environ.get("WALKFORWARD", "false").lower() == "true":
+        run_walkforward()
+    else:
+        run()

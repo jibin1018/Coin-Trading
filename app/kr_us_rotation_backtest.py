@@ -327,8 +327,160 @@ def run_walkforward() -> None:
     print(f"  OOS 알파: {alpha_oos:+.1f}%p -> {verdict}")
 
 
+def _sim_long_short(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int,
+                     eval_start: "pd.Timestamp | None" = None) -> dict:
+    """코인 momentum_rotation과 같은 달러중립 롱숏 구조 — 상위 top_n 롱 + 하위 top_n 숏,
+    각각 0.5/top_n씩 배분(합쳐서 시장노출 0에 가깝게). 백테스트 전용 — 국내는 개인
+    공매도가 사실상 막혀있고 KIS API에도 숏 주문 TR ID가 없어서 실거래 전환은 별도 검토
+    필요(대주 가능 여부, 차입비용 등 여기서는 반영 안 함).
+
+    롱온리 버전(_sim)의 손절/순위버퍼/킬스위치를 롱+숏 양쪽에 그대로 적용한다 — 숏은
+    방향이 반대라 손절 조건(가격이 올라야 손절)만 부호를 뒤집는다. 레짐필터는 안 쓴다
+    (달러중립 북이라 시장 방향 타이밍에 덜 의존해야 의미가 있음)."""
+    rets = closes.pct_change()
+    mom = closes.pct_change(lookback)
+
+    dates = closes.index
+    start = max(lookback + 1, 200)
+    w = pd.Series(0.0, index=closes.columns)
+    last_w = w.copy()
+    entry_price: dict[str, float] = {}
+    daily = []
+    idx = []
+    turnovers = []
+
+    equity = 1.0
+    peak = 1.0
+    halted_until = -1
+
+    for i in range(start, len(dates)):
+        d = dates[i]
+        g = (w * rets.loc[d].fillna(0.0)).sum()
+
+        stopped = []
+        for sym, side_w in w.items():
+            if side_w == 0 or sym not in entry_price or pd.isna(closes.loc[d, sym]):
+                continue
+            price = closes.loc[d, sym]
+            if side_w > 0 and price <= entry_price[sym] * (1 - STOP_LOSS_PCT):
+                stopped.append(sym)
+            elif side_w < 0 and price >= entry_price[sym] * (1 + STOP_LOSS_PCT):
+                stopped.append(sym)
+        if stopped:
+            for sym in stopped:
+                w[sym] = 0.0
+                del entry_price[sym]
+            turn = len(stopped) / (top_n * 2)
+            turnovers.append(turn)
+            g -= turn * COST_PER_SIDE_PCT / 100
+
+        equity *= (1 + g)
+        peak = max(peak, equity)
+
+        if PORTFOLIO_KILL_DD is not None and halted_until < i:
+            dd = 1 - equity / peak
+            if dd >= PORTFOLIO_KILL_DD:
+                turn = w.abs().sum()
+                if turn > 0:
+                    cost = turn * COST_PER_SIDE_PCT / 100
+                    g -= cost
+                    equity *= (1 - cost)
+                    turnovers.append(turn)
+                w = pd.Series(0.0, index=closes.columns)
+                last_w = w.copy()
+                entry_price.clear()
+                halted_until = i + KILL_COOLDOWN_DAYS
+                peak = equity
+
+        daily.append(g)
+        idx.append(d)
+
+        if halted_until >= i:
+            continue
+
+        if (i - start) % rebal == 0:
+            m = mom.loc[d].dropna()
+            m = m[closes.loc[d].notna()]
+            nw = pd.Series(0.0, index=closes.columns)
+            if len(m) >= top_n * 2:
+                ranked = list(m.sort_values(ascending=False).index)
+                long_buffer = set(ranked[:top_n + RANK_BUFFER])
+                short_buffer = set(ranked[-(top_n + RANK_BUFFER):])
+                held_long = {s for s in w.index if w[s] > 0}
+                held_short = {s for s in w.index if w[s] < 0}
+
+                keep_long = held_long & long_buffer
+                new_long = [s for s in ranked if s not in keep_long][:max(top_n - len(keep_long), 0)]
+                sel_long = keep_long | set(new_long)
+
+                keep_short = held_short & short_buffer
+                new_short_candidates = [s for s in reversed(ranked) if s not in keep_short and s not in sel_long]
+                new_short = new_short_candidates[:max(top_n - len(keep_short), 0)]
+                sel_short = keep_short | set(new_short)
+
+                if sel_long:
+                    nw[list(sel_long)] = 0.5 / len(sel_long)
+                if sel_short:
+                    nw[list(sel_short)] = -0.5 / len(sel_short)
+            turn = (nw - last_w).abs().sum()
+            turnovers.append(turn)
+            daily[-1] -= turn * COST_PER_SIDE_PCT / 100
+            for sym in nw.index:
+                if nw[sym] != 0 and sym not in entry_price:
+                    entry_price[sym] = closes.loc[d, sym]
+                elif nw[sym] == 0 and sym in entry_price:
+                    del entry_price[sym]
+            w, last_w = nw, nw.copy()
+
+    dseries = pd.Series(daily, index=idx)
+    if eval_start is not None:
+        dseries = dseries[dseries.index >= eval_start]
+    eq = (1 + dseries).cumprod()
+    r = _metrics(eq, dseries)
+    r["ann_turn"] = float(np.sum(turnovers)) / ((idx[-1] - idx[0]).days / 365.25)
+    return r
+
+
+def run_long_short() -> None:
+    """백테스트 전용 롱숏 탐색 — 실거래 전환은 공매도 가능 여부(특히 국내)를 먼저
+    확인해야 한다. 롱온리 버전과 같은 비용가정/유니버스로 직접 비교할 수 있게 짰다."""
+    print(f"[{MARKET}] 캐시 워밍/로드 (since {SINCE})...")
+    closes = _load_closes()
+    print(f"유효 {closes.shape[1]}종목, {closes.index[0].date()} ~ {closes.index[-1].date()}\n")
+
+    bh_eq, bh_daily = _ew_buy_hold(closes)
+    bh = _metrics(bh_eq, bh_daily)
+    print(f"[벤치마크] 등가중 매수&보유: CAGR {bh['cagr']:+.1f}%, MDD {bh['mdd']:.1f}%\n")
+
+    rows = []
+    for lb, rb, tn in itertools.product(LOOKBACKS, REBALS, TOP_NS):
+        r = _sim_long_short(closes, lb, rb, tn)
+        r.update(lb=lb, rb=rb, tn=tn, alpha=r["cagr"] - bh["cagr"])
+        rows.append(r)
+    rows.sort(key=lambda x: -x["calmar"])
+
+    print(f"{'룩백':>5} {'리밸':>5} {'TopN':>5} | {'CAGR':>8} {'MDD':>7} "
+          f"{'Sharpe':>7} {'Calmar':>7} {'알파':>8} {'연회전':>7}")
+    print("-" * 80)
+    for r in rows[:15]:
+        print(f"{r['lb']:>5} {r['rb']:>5} {r['tn']:>5} | {r['cagr']:>+7.1f}% "
+              f"{r['mdd']:>6.1f}% {r['sharpe']:>7.2f} {r['calmar']:>7.2f} {r['alpha']:>+7.1f}% "
+              f"{r['ann_turn']:>6.1f}x")
+
+    beat = [r for r in rows if r["alpha"] > 0]
+    print(f"\nEW-B&H 이긴 조합: {len(beat)}/{len(rows)}")
+    best = rows[0]
+    print(f"\n최고 Calmar: 룩백{best['lb']}/리밸{best['rb']}/top{best['tn']} "
+          f"CAGR {best['cagr']:+.1f}% vs B&H {bh['cagr']:+.1f}% (알파 {best['alpha']:+.1f}%), "
+          f"MDD {best['mdd']:.1f}% vs {bh['mdd']:.1f}%")
+    print("\n주의: 백테스트 전용(공매도 체결/대주 가능여부/차입비용 미반영). "
+          "배당 재투자 반영(조정종가), 생존편향 있음.")
+
+
 if __name__ == "__main__":
-    if os.environ.get("WALKFORWARD", "false").lower() == "true":
+    if os.environ.get("LONG_SHORT", "false").lower() == "true":
+        run_long_short()
+    elif os.environ.get("WALKFORWARD", "false").lower() == "true":
         run_walkforward()
     else:
         run()

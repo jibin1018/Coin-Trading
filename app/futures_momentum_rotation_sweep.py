@@ -60,7 +60,7 @@ def _fetch_funding_daily(dates: pd.DatetimeIndex) -> pd.DataFrame:
 def simulate(
     closes: pd.DataFrame, lookback: int, rebalance_every: int, top_k: int,
     funding: pd.DataFrame | None = None,
-) -> tuple[float, float, float, int]:
+) -> tuple[float, float, float, int, pd.Series]:
     returns = closes.pct_change()
     momentum = closes.pct_change(lookback)
     dates = closes.index
@@ -72,6 +72,7 @@ def simulate(
     last_weights = weights.copy()
     n_rebal = 0
     halted_until = -1
+    equity_hist: list[tuple[pd.Timestamp, float]] = []
 
     for i in range(start_idx, len(dates)):
         date = dates[i]
@@ -115,9 +116,12 @@ def simulate(
                 last_weights = new_weights.copy()
                 n_rebal += 1
 
+        equity_hist.append((date, equity))  # 멀티전략 블렌딩용 — 그날 모든 조정 끝난 뒤의 값
+
     years = (dates[-1] - dates[start_idx]).days / 365.25
     annualized_pct = ((equity) ** (1 / years) - 1) * 100 if years > 0 else float("nan")
-    return annualized_pct, max_dd * 100, years, n_rebal
+    daily_returns = pd.Series({d: e for d, e in equity_hist}).sort_index().pct_change().fillna(0.0)
+    return annualized_pct, max_dd * 100, years, n_rebal, daily_returns
 
 
 def run() -> None:
@@ -136,7 +140,7 @@ def run() -> None:
     for lookback in [14, 30, 45, 60]:
         for rebalance in [3, 7, 14]:
             for top_k in [3, 5, 8]:
-                ann, mdd, years, n = simulate(closes, lookback, rebalance, top_k, funding)
+                ann, mdd, years, n, _ = simulate(closes, lookback, rebalance, top_k, funding)
                 grid.append((lookback, rebalance, top_k, ann, mdd, n))
                 print(f"{lookback:>9}{rebalance:>7}{top_k:>7}{ann:>8.2f}%{mdd:>7.1f}%{n:>9}")
 

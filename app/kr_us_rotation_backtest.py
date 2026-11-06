@@ -239,6 +239,7 @@ def _sim(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int, regime: st
     eq = (1 + dseries).cumprod()
     r = _metrics(eq, dseries)
     r["ann_turn"] = float(np.sum(turnovers)) / ((idx[-1] - idx[0]).days / 365.25)
+    r["daily"] = dseries  # 멀티전략 블렌딩용(app/multi_strategy_blend_backtest.py) — 기존 호출부엔 영향 없음
     return r
 
 
@@ -438,6 +439,7 @@ def _sim_long_short(closes: pd.DataFrame, lookback: int, rebal: int, top_n: int,
     eq = (1 + dseries).cumprod()
     r = _metrics(eq, dseries)
     r["ann_turn"] = float(np.sum(turnovers)) / ((idx[-1] - idx[0]).days / 365.25)
+    r["daily"] = dseries  # 멀티전략 블렌딩용(app/multi_strategy_blend_backtest.py) — 기존 호출부엔 영향 없음
     return r
 
 

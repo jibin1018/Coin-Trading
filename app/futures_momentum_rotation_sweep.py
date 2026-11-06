@@ -22,6 +22,8 @@ FUNDING_AWARE = os.environ.get("FUNDING_AWARE", "false").lower() == "true"
 # 전량청산+쿨다운)를 코인 쪽에도 테스트해볼 수 있게 옵션으로 추가. 0/미설정=꺼짐.
 KILL_DD = float(os.environ.get("KILL_DD", "0")) or None
 KILL_COOLDOWN_DAYS = int(os.environ.get("KILL_COOLDOWN_DAYS", "20"))
+# README 포크 스냅샷: "2배 레버리지 적용 시 기대 CAGR +33%/MDD 29%, 미적용 상태" — 실측 안 돼있던 것.
+LEVERAGE = float(os.environ.get("LEVERAGE", "1"))
 
 
 def _fetch_closes() -> pd.DataFrame:
@@ -105,8 +107,8 @@ def simulate(
                 longs = ranked.index[:top_k]
                 shorts = ranked.index[-top_k:]
                 new_weights = pd.Series(0.0, index=closes.columns)
-                new_weights[longs] = 0.5 / top_k
-                new_weights[shorts] = -0.5 / top_k
+                new_weights[longs] = 0.5 / top_k * LEVERAGE
+                new_weights[shorts] = -0.5 / top_k * LEVERAGE
                 turnover = (new_weights - last_weights).abs().sum()
                 equity *= (1 - turnover * COMMISSION_PCT / 100)
                 weights = new_weights

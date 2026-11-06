@@ -50,6 +50,12 @@ RS_RANKS = ["off", "on"]
 EXIT_MODES = ["trail_ema", "rr2"]
 STOP_MODES = ["swing", "pct"]
 
+# 포크 시점 기록: CAGR+62%/MDD72%/Sharpe1.05 — MDD가 너무 커서 페이퍼도 못 올라갔다.
+# app/kr_us_rotation_backtest.py에서 주식 로테이션에 효과가 컸던 계좌 전체 킬스위치를
+# 여기도 테스트해본다. 0/미설정=꺼짐.
+KILL_DD = float(os.environ.get("LAB_KILL_DD", "0")) or None
+KILL_COOLDOWN_DAYS = int(os.environ.get("LAB_KILL_COOLDOWN_DAYS", "20"))
+
 
 def _prep(frame: pd.DataFrame) -> pd.DataFrame:
     out = add_mach7_ma_pullback(
@@ -82,8 +88,36 @@ def _run_portfolio(prepped: dict, dates: pd.DatetimeIndex, btc_ok: pd.Series | N
     eq_curve = []
     n_trades = 0
     exposure_days = 0
+    peak = 1.0
+    halted_until = None
 
     for d in dates:
+        # 0) 계좌 전체 킬스위치 — 종목별 손절과 별개로, 전체 드로다운이 임계값을 넘으면
+        # 전량 청산하고 쿨다운 동안 재진입을 금지한다.
+        if KILL_DD is not None and (halted_until is None or d > halted_until):
+            mtm_now = cash + sum(
+                positions[s]["qty"] * float(prepped[s].loc[d, "Close"])
+                for s in positions if d in prepped[s].index
+            )
+            peak = max(peak, mtm_now)
+            dd = 1 - mtm_now / peak
+            if dd >= KILL_DD and positions:
+                for sym, pos in positions.items():
+                    df = prepped[sym]
+                    price = float(df.loc[d, "Close"]) if d in df.index else pos["entry"]
+                    cash += pos["qty"] * price * (1 - fee)
+                    n_trades += 1
+                positions = {}
+                halted_until = d + pd.Timedelta(days=KILL_COOLDOWN_DAYS)
+                peak = cash
+            elif dd >= KILL_DD:
+                halted_until = d + pd.Timedelta(days=KILL_COOLDOWN_DAYS)
+                peak = mtm_now
+
+        if halted_until is not None and d <= halted_until:
+            eq_curve.append((d, cash))
+            continue
+
         # 1) 청산
         for sym in list(positions):
             df = prepped[sym]
